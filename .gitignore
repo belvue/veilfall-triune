@@ -9,7 +9,6 @@
 
 # --- MQ drop: /lua run vfti + /lua run vft/inv ---
 !lua/
-!lua/bags.lua
 !lua/vfti.lua
 !lua/vft/
 !lua/vft/brand.lua

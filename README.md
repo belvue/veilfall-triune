@@ -8,7 +8,6 @@ Inventory for Triune. Drop these in your MQ `lua` folder:
 - `vft/chat.lua`
 - `vft/vf-mark.png`
 - `vft/vf-bag.png`
-- `bags.lua` (optional)
 
 Fire up the loader:
 

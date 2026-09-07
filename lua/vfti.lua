@@ -93,8 +93,8 @@ local function invPid()
             pcall(function() path = tostring(s.Path() or '') end)
             name = name:gsub('\\', '/'):lower()
             path = path:gsub('\\', '/'):lower()
-            if name == 'vft/inv' or name == 'inv' or name == 'bags' then return true end
-            if path:find('vft/inv', 1, true) or path:match('bags%.lua$') then return true end
+            if name == 'vft/inv' or name == 'inv' then return true end
+            if path:find('vft/inv', 1, true) then return true end
             return false
         end
         local pids = tostring(mq.TLO.Lua.PIDs() or '')
@@ -113,7 +113,6 @@ local function toggleInv()
     local pid = invPid()
     if pid then
         mq.cmd('/lua stop vft/inv')
-        mq.cmd('/lua stop bags')
         if type(pid) == 'number' then mq.cmdf('/lua stop %d', pid) end
     else
         mq.cmd('/lua run vft/inv')
