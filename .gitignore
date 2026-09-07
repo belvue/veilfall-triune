@@ -1,0 +1,28 @@
+# VF: whitelist — only inventory trial drop + thin meta. Everything else stays local.
+
+*
+!*/
+
+# --- always ---
+!.gitignore
+!README.md
+
+# --- MQ drop: /lua run vfti + /lua run vft/inv ---
+!lua/
+!lua/bags.lua
+!lua/vfti.lua
+!lua/vft/
+!lua/vft/brand.lua
+!lua/vft/chat.lua
+!lua/vft/vf-mark.png
+!lua/vft/vf-bag.png
+!lua/vft/inv/
+!lua/vft/inv/**
+
+# --- local / machine / not inv ---
+_live/
+_live.target
+client.target
+_archive/
+*.log
+.lua/
