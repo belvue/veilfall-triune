@@ -1,53 +1,13 @@
 ---@diagnostic disable: undefined-global, undefined-field
--- VF: Per-toon locked bag items — vft/config/{server}_{char}_inventory.ini
--- VF: Keys are item IDs (id=Name). No os.execute from draw.
+-- VF: Per-toon locked bag items — [Locked] in vft/config/{server}_{char}_loadout.ini
 
 local mq = require('mq')
+local store = require('vft.toonini')
 
 local M = {}
 
 local function trim(s)
     return (tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', ''))
-end
-
-local function fileKey(s)
-    s = tostring(s or ''):lower():gsub('[^%w]+', '_'):gsub('^_+', ''):gsub('_+$', '')
-    if s == '' then return 'unknown' end
-    return s
-end
-
-local function serverKey()
-    local s = ''
-    pcall(function()
-        s = tostring(mq.TLO.EverQuest.Server() or '')
-        if s == '' or s == 'NULL' then
-            s = tostring(mq.TLO.MacroQuest.Server() or '')
-        end
-    end)
-    if s == 'NULL' then s = '' end
-    s = fileKey(s)
-    if s == 'unknown' then s = 'local' end
-    return s
-end
-
-local function charKey()
-    local n = ''
-    pcall(function() n = mq.TLO.Me.CleanName() end)
-    n = trim(n)
-    if n == '' or n == 'NULL' then
-        pcall(function() n = mq.TLO.Me.Name() end)
-        n = trim(n)
-    end
-    return fileKey(n)
-end
-
-local function configDir()
-    local here = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
-    return (here .. '../config'):gsub('\\', '/')
-end
-
-function M.path()
-    return configDir() .. '/' .. serverKey() .. '_' .. charKey() .. '_inventory.ini'
 end
 
 local function findIdByName(name)
@@ -67,67 +27,54 @@ local function findIdByName(name)
     return id
 end
 
--- VF: Returns locked[id] = name (or ""), plus migrated=true if legacy name keys were resolved.
+function M.path()
+    return store.path()
+end
+
+-- VF: Returns locked[id] = name (or ""), plus migrated=true if leftover name keys were resolved.
 function M.load()
+    local data, path, migrated = store.load()
     local out = {}
-    local path = M.path()
-    local f = io.open(path, 'r')
-    if not f then return out, path, false end
-    local sec = ''
-    local migrated = false
-    for line in f:lines() do
-        local hdr = line:match('^%s*%[(.-)%]%s*$')
-        if hdr then
-            sec = hdr:lower()
-        elseif sec == 'locked' then
-            local key, val = line:match('^%s*(.-)%s*=%s*(.-)%s*$')
-            if key and key ~= '' and not key:match('^%s*;') then
-                key, val = trim(key), trim(val)
-                local id = tonumber(key)
-                if id and id > 0 then
-                    if val == '' or val == '1' or val:lower() == 'true' or val:lower() == 'yes' then
-                        out[id] = ''
-                    else
-                        out[id] = val
-                    end
-                else
-                    -- VF: legacy Name=1 → resolve to ID once.
-                    local resolved = findIdByName(key)
-                    if resolved > 0 then
-                        out[resolved] = key
-                        migrated = true
-                    end
-                end
+    local extra = false
+    for key, val in pairs(data.locked or {}) do
+        local id = tonumber(key)
+        if id and id > 0 then
+            out[id] = val
+        else
+            local resolved = findIdByName(tostring(key))
+            if resolved > 0 then
+                out[resolved] = tostring(key)
+                extra = true
             end
         end
     end
-    f:close()
+    if extra then
+        store.update(function(fresh)
+            fresh.locked = out
+        end)
+        migrated = true
+    end
     return out, path, migrated
 end
 
--- VF: Call from tick (not ImGui draw). Writes id=Name lines.
 function M.save(locked)
     locked = locked or {}
-    local path = M.path()
-    local ids = {}
+    local clean = {}
     for id, name in pairs(locked) do
         id = tonumber(id) or 0
-        if id > 0 then ids[#ids + 1] = id end
+        if id > 0 then clean[id] = name end
     end
-    table.sort(ids)
-    local f = io.open(path, 'w')
-    if not f then
-        return false, path
-    end
-    f:write('; VF Bags locks by item id\n')
-    f:write('[Locked]\n')
-    for _, id in ipairs(ids) do
-        local name = locked[id]
-        if type(name) ~= 'string' or name == '' then name = '1' end
-        f:write(tostring(id) .. '=' .. name .. '\n')
-    end
-    f:close()
-    return true, path
+    return store.update(function(data)
+        data.locked = clean
+    end)
+end
+
+function M.lockItem(id, name)
+    id = tonumber(id) or 0
+    if id <= 0 then return false end
+    local map = M.load()
+    map[id] = trim(name)
+    return M.save(map)
 end
 
 return M

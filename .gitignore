@@ -1,4 +1,4 @@
-# VF: whitelist — only inventory trial drop + thin meta. Everything else stays local.
+# VF: whitelist — engine snapshot only. Tools, live, archive, and machine paths stay local.
 
 *
 !*/
@@ -6,22 +6,25 @@
 # --- always ---
 !.gitignore
 !README.md
+!AGENTS.md
+!_live.target.example
 
-# --- MQ drop: /lua run vfti + /lua run vft/inv ---
+# --- snapshot: /lua run vf ---
 !lua/
-!lua/vfti.lua
+!lua/vf.lua
+!lua/vft.lua
+!lua/vfup.lua
 !lua/vft/
-!lua/vft/brand.lua
-!lua/vft/chat.lua
-!lua/vft/vf-mark.png
-!lua/vft/vf-bag.png
-!lua/vft/inv/
-!lua/vft/inv/**
+!lua/vft/**
+lua/vft/config/*
+!lua/vft/config/.gitkeep
+lua/vft/.rev
 
-# --- local / machine / not inv ---
+# --- local / machine ---
 _live/
 _live.target
 client.target
 _archive/
+tools/
 *.log
 .lua/

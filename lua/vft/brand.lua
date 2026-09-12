@@ -72,6 +72,11 @@ function M.drawHeaderWash()
 end
 
 function M.drawHeader(extra)
+    M.drawHeaderPath('Triune', extra)
+end
+
+-- VF: Veilfall.cc | mid > extra  (item modal uses mid=Manager).
+function M.drawHeaderPath(mid, extra)
     M.drawLogo(20)
     if ImGui.IsItemHovered() then
         pcall(ImGui.SetTooltip, M.windowTitle())
@@ -81,7 +86,7 @@ function M.drawHeader(extra)
     ImGui.SameLine()
     ImGui.TextDisabled('|')
     ImGui.SameLine()
-    ImGui.TextColored(BONE[1], BONE[2], BONE[3], BONE[4], 'Triune')
+    ImGui.TextColored(BONE[1], BONE[2], BONE[3], BONE[4], tostring(mid or 'Triune'))
     if extra and extra ~= '' then
         extra = tostring(extra):gsub('^[|>]%s*', '')
         if extra ~= '' then

@@ -6,6 +6,7 @@ local ImGui = require('ImGui')
 local brand = require('vft.brand')
 local chat = require('vft.chat')
 local invLocks = require('vft.inv.locks')
+local powerSrc = require('vft.powersource')
 
 local NUM_PACKS = 12
 local SCAN_SEC = 0.25
@@ -361,6 +362,8 @@ local function create(opts)
     opts = opts or {}
     local hosted = not not opts.hosted
     local openGUI = not hosted
+    powerSrc.installEvents('VftInvPs')
+    powerSrc.refresh()
     local filter = ''
     local showEmpty = false
     local showHelp = false
@@ -370,7 +373,7 @@ local function create(opts)
     local view = 'bags'
     local checked = {} -- checked[where][name] = true
     -- local bagTrace = false -- VF: re-enable Trace checkbox below when debugging sell/moves
-    local locked = {} -- item id -> name; vft/config/{server}_{char}_inventory.ini
+    local locked = {} -- item id -> name; [Locked] in {server}_{char}_loadout.ini
     local lockPath = ''
     local locksDirty = false
     local lockSaveWarned = false
@@ -2007,8 +2010,14 @@ local function create(opts)
         return pending ~= nil or destroyArmed ~= nil or #massDestroyQ > 0
     end
 
+    local lastLockReload = 0
+
     function app.tick()
         pcall(flushLocks)
+        if not locksDirty and (os.clock() - lastLockReload) > 2.0 then
+            lastLockReload = os.clock()
+            pcall(reloadLocks)
+        end
         pcall(tickBankWatch)
         pcall(tickScribe)
         finishDestroy()
@@ -2133,7 +2142,7 @@ local function create(opts)
             winFlags = bitbor(F.NoTitleBar, F.NoCollapse)
             if F.NoScrollbar then winFlags = bitbor(winFlags, F.NoScrollbar) end
         end
-        local opened, shown = ImGui.Begin(brand.windowTitle('Inventory') .. '###vftInv', true, winFlags)
+        local opened, shown = ImGui.Begin(brand.windowTitle('Inventory') .. '###vfInv', true, winFlags)
         if shown == nil then shown = opened ~= false end
         if shown then
             if brand.drawHeaderWash then brand.drawHeaderWash() end
@@ -2164,7 +2173,7 @@ local function create(opts)
                         ImGui.SetCursorPosX(lineStart + lineW - btnW)
                     end
                 end)
-                if ImGui.SmallButton('?##vftInvHelp') then
+                if ImGui.SmallButton('?##vfInvHelp') then
                     showHelp = not showHelp
                 end
                 if ImGui.IsItemHovered() then
@@ -2192,7 +2201,7 @@ local function create(opts)
                         pushed = pushed + 1
                     end
                 end
-                if ImGui.Button(label .. '##vftInvTab' .. key, 64, 24) then
+                if ImGui.Button(label .. '##vfInvTab' .. key, 64, 24) then
                     if view ~= key then
                         view = key
                         clearChecks()
@@ -2218,18 +2227,18 @@ local function create(opts)
             filter = ImGui.InputText('##bagfilter', filter or '')
             --[[ VF: Trace - re-enable when debugging sell/moves
             ImGui.SameLine()
-            bagTrace = ImGui.Checkbox('Trace##vftInvTrace', bagTrace)
+            bagTrace = ImGui.Checkbox('Trace##vfInvTrace', bagTrace)
             if ImGui.IsItemHovered() then
                 setTip('Trace sell steps to chat')
             end
             --]]
             ImGui.SameLine()
-            if ImGui.Button('Refresh##vftInvRefresh', 70, 24) then lastScan = 0 end
+            if ImGui.Button('Refresh##vfInvRefresh', 70, 24) then lastScan = 0 end
             if view == 'bags' then
                 ImGui.SameLine()
                 local memBusy = (#memQ > 0) or (memExpect ~= nil)
                 if memBusy then
-                    if ImGui.Button('Stop##vftInvScribeStop', 88, 24) then
+                    if ImGui.Button('Stop##vfInvScribeStop', 88, 24) then
                         memQ = {}
                         memExpect = nil
                         memWaitUntil = 0
@@ -2238,7 +2247,7 @@ local function create(opts)
                         status = string.format('scribe stopped -- %d ok, %d skip, %d fail', memDone, memSkip, memFail)
                     end
                 else
-                    if ImGui.Button('Scribe All##vftInvScribeAll', 88, 24) then
+                    if ImGui.Button('Scribe All##vfInvScribeAll', 88, 24) then
                         clickNow('scribeall')
                     end
                 end
@@ -2246,7 +2255,7 @@ local function create(opts)
                     setTip('Scribe spells, songs, scrolls, and tomes from bags')
                 end
                 ImGui.SameLine()
-                if ImGui.Button('Vault Merchant##vftInvVault', 120, 24) then
+                if ImGui.Button('Vault Merchant##vfInvVault', 120, 24) then
                     clickNow('vaultmerch')
                 end
                 if ImGui.IsItemHovered() then
@@ -2254,7 +2263,7 @@ local function create(opts)
                 end
             else
                 ImGui.SameLine()
-                if ImGui.Button('Open Bank##vftInvOpenBank', 90, 24) then clickNow('openbank') end
+                if ImGui.Button('Open Bank##vfInvOpenBank', 90, 24) then clickNow('openbank') end
             end
 
             local canSell = merchantOpen()
@@ -2318,28 +2327,22 @@ local function create(opts)
                 end
             end
 
-            -- VF: Triune unique. PowerSource inventory slot.
+            -- VF: Triune Power Source. Exp is server custom data; MQ reads TLOs + INI/cache.
             local function drawPowerSourceBox(w, h)
-                local psName, psIcon, psPct = '', 0, nil
-                pcall(function()
-                    local slot = mq.TLO.Me.Inventory('PowerSource')
-                    if slot and slot() then
-                        psName = trim(slot.Name())
-                        psIcon = tonumber(slot.Icon()) or 0
-                        local evo = tonumber(slot.Evolving.ExpPct())
-                        if evo and evo >= 0 then psPct = evo end
-                    end
-                end)
+                local info = powerSrc.info()
+                local psName = info.name or ''
+                local psIcon = info.icon or 0
+                local psPct = info.pct
                 local cf = (ImGuiChildFlags and ImGuiChildFlags.Borders) or true
                 if ImGui.BeginChild('taPowerSrc', w, h, cf, slotChildFlags()) then
-                    if psName ~= '' and psName ~= 'NULL' then
+                    if psName ~= '' and psName ~= 'NULL' and not info.empty then
                         if psIcon > 0 then
                             drawIcon(psIcon)
                             ImGui.SameLine()
                         end
                         if psPct ~= nil then
                             ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4],
-                                string.format('%d%%', math.floor(psPct + 0.5)))
+                                string.format('%.1f%%', psPct))
                         else
                             ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '--%')
                         end
@@ -2356,11 +2359,16 @@ local function create(opts)
                 end
                 ImGui.EndChild()
                 if ImGui.IsItemHovered() then
-                    local tip = 'Triune Power Source\nClick to place or pick. Shows growth %.'
-                    if psName ~= '' and psName ~= 'NULL' then
+                    local tip = 'Triune Power Source\nClick to place or pick.'
+                    if psName ~= '' and psName ~= 'NULL' and not info.empty then
                         tip = psName
                         if psPct ~= nil then
-                            tip = tip .. string.format('\n%d%% grown', math.floor(psPct + 0.5))
+                            tip = tip .. string.format('\n%.2f%% grown', psPct)
+                            if info.source and info.source ~= '' then
+                                tip = tip .. ' (' .. tostring(info.source) .. ')'
+                            end
+                        else
+                            tip = tip .. '\nGrowth % not on client yet'
                         end
                         tip = tip .. '\nClick to swap'
                     end
@@ -2499,7 +2507,7 @@ local function create(opts)
                 if ww > railW + 40 then leftW = ww - railW - 28 end
             end)
             if ImGui.BeginChild('taBagsFootL', leftW, SLOT_H, false) then
-                if ImGui.SmallButton('All##vftInvChkAll') then
+                if ImGui.SmallButton('All##vfInvChkAll') then
                     local n = 0
                     for _, row in ipairs(rows) do
                         -- VF: All skips locked.
@@ -2513,7 +2521,7 @@ local function create(opts)
                 end
                 if ImGui.IsItemHovered() then setTip('Select All') end
                 ImGui.SameLine()
-                if ImGui.SmallButton('None##vftInvChkNone') then clearChecks() end
+                if ImGui.SmallButton('None##vfInvChkNone') then clearChecks() end
                 if ImGui.IsItemHovered() then setTip('Deselect All') end
                 ImGui.SameLine()
                 ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], nChk .. ' checked')
@@ -2522,7 +2530,7 @@ local function create(opts)
                 local function massBtn(label, op, enable, tip, w)
                     w = w or 70
                     if not enable then ImGui.BeginDisabled() end
-                    if ImGui.Button(label .. '##vftInvMass' .. op, w, 24) then
+                    if ImGui.Button(label .. '##vfInvMass' .. op, w, 24) then
                         clickNow(op)
                     end
                     if not enable then ImGui.EndDisabled() end
@@ -2583,16 +2591,16 @@ local function create(opts)
             pcall(function() ww = ImGui.GetWindowWidth() or 0 end)
             if ww < 1 then ww = 560 end
             ImGui.SetCursorPosX(math.max(12, ww - 12 - btnW))
-            if ImGui.Button('Close##vftInvClose', btnW, 24) then
+            if ImGui.Button('Close##vfInvClose', btnW, 24) then
                 openGUI = false
             end
 
             -- VF: Turn-In confirm (plow empties stacks).
             if turninConfirm then
-                pcall(function() ImGui.OpenPopup('Turn-In###vftInvTurnInConfirm') end)
+                pcall(function() ImGui.OpenPopup('Turn-In###vfInvTurnInConfirm') end)
             end
             pcall(function() ImGui.SetNextWindowSize(420, 280, ImGuiCond.Appearing) end)
-            if ImGui.BeginPopupModal('Turn-In###vftInvTurnInConfirm') then
+            if ImGui.BeginPopupModal('Turn-In###vfInvTurnInConfirm') then
                 local conf = turninConfirm
                 local names = conf and conf.names or {}
                 local tname = conf and conf.target or 'target'
@@ -2612,12 +2620,12 @@ local function create(opts)
                     'This keeps going for each checked name until you have none left. '
                     .. 'Make sure the target is the right NPC.')
                 ImGui.Dummy(0, 8)
-                if ImGui.Button('Turn-In##vftInvTurnInGo', 100, 24) then
+                if ImGui.Button('Turn-In##vfInvTurnInGo', 100, 24) then
                     ImGui.CloseCurrentPopup()
                     clickNow('turningo')
                 end
                 ImGui.SameLine()
-                if ImGui.Button('Cancel##vftInvTurnInCancel', 80, 24) then
+                if ImGui.Button('Cancel##vfInvTurnInCancel', 80, 24) then
                     turninConfirm = nil
                     ImGui.CloseCurrentPopup()
                 end
@@ -2632,7 +2640,7 @@ local function create(opts)
             local helpOpen = true
             local helpShown
             helpOpen, helpShown = ImGui.Begin(
-                brand.windowTitle('Inventory Help') .. '###vftInvHelpWin', helpOpen)
+                brand.windowTitle('Inventory Help') .. '###vfInvHelpWin', helpOpen)
             if helpShown == nil then helpShown = helpOpen ~= false end
             if helpOpen == false then showHelp = false end
             if helpShown and showHelp then
@@ -2666,8 +2674,8 @@ local function create(opts)
                 ImGui.BulletText('AutoInv puts the cursor item away.')
                 ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Power Source')
                 ImGui.TextWrapped(
-                    'Triune-only. Items in this slot level up and the % shows how far they have grown. '
-                    .. 'Swap them here instead of digging through bags or the game inventory window.')
+                    'Triune-only leveling slot. Growth % comes from the item (cached for the mini bar). '
+                    .. 'Swap them here instead of digging bags.')
                 ImGui.BulletText('Click with an item on the cursor to place it.')
                 ImGui.BulletText('Click a filled slot to pick it up.')
                 ImGui.Dummy(0, 4)
@@ -2675,9 +2683,9 @@ local function create(opts)
                 ImGui.BulletText('Scribe All learns from bags.')
                 ImGui.BulletText('Locks save per character.')
                 ImGui.Dummy(0, 8)
-                hideTooltips = ImGui.Checkbox('Hide tooltips##vftInvHideTips', hideTooltips)
+                hideTooltips = ImGui.Checkbox('Hide tooltips##vfInvHideTips', hideTooltips)
                 ImGui.Dummy(0, 6)
-                if ImGui.Button('Close##vftInvHelpClose', 80, 24) then
+                if ImGui.Button('Close##vfInvHelpClose', 80, 24) then
                     showHelp = false
                 end
             end

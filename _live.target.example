@@ -1,0 +1,6 @@
+# Copy to _live.target (gitignored) and run:
+#   powershell -File tools/link-live.ps1
+#
+# First non-comment line must be the MacroQuest lua folder for this install.
+# Example:
+#   D:\MacroQuest\lua
