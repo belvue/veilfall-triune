@@ -6,7 +6,6 @@
 # --- always ---
 !.gitignore
 !README.md
-!AGENTS.md
 !_live.target.example
 
 # --- snapshot: /lua run vf ---
