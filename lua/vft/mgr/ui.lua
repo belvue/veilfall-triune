@@ -1959,15 +1959,22 @@ local function drawFooter(state, actions)
 end
 
 local function drawUpdatePanel()
-    Up.ensureCheck()
-    local rel = Up.short(Up.releaseSha)
-    local cur = Up.short(Up.currentSha())
-    ImGui.Text('Release: ' .. (rel ~= '' and rel or (Up.busy() and 'checking…' or '—')))
-    ImGui.Text('Current: ' .. (cur ~= '' and cur or '—'))
+    local rel = Up.display(Up.release)
+    local cur = Up.display(Up.current())
     local busy = Up.busy()
+    ImGui.Text('GitHub')
+    ImGui.Text('Release: ' .. (rel ~= '' and rel or (Up.note == 'checking…' and 'checking…' or '—')))
+    ImGui.Text('Current: ' .. (cur ~= '' and cur or '—'))
     if busy then
-        if Up.note == 'updating…' then textMuted(Up.note) end
+        if Up.note ~= '' then textMuted(Up.note) end
     else
+        if ImGui.Button('Check##vfGitCheck', 88, 24) then
+            Up.startCheck()
+        end
+        if ImGui.IsItemHovered() then
+            setTooltip('Fetch lua/vft/version.txt from GitHub. A few bytes, no zip.')
+        end
+        ImGui.SameLine(0, 8)
         if ImGui.Button('Update##vfGitUpdate', 88, 24) then
             Up.startUpdate()
         end

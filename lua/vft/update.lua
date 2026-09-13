@@ -1,5 +1,5 @@
 -- VF: overlay GitHub main onto mq.luaDir. Mgr Settings + /lua run vfup.
--- VF: owned set only. Never vft/config ini. Reload is Manager's job, not this module's CLI.
+-- VF: Check fetches lua/vft/version.txt (0.N.N). Never on draw. README is fallback.
 
 local mq = require('mq')
 
@@ -7,12 +7,14 @@ local M = {}
 
 M.REPO = 'belvue/veilfall-triune'
 M.BRANCH = 'main'
-M.releaseSha = ''
+M.release = ''
 M.note = ''
 M.err = ''
 
 local job = nil
-local checkedAt = 0
+local currentCache, currentAt = '', -1
+local VER_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/version.txt'
+local README_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md'
 
 local function luaDir()
     local dir = ''
@@ -37,14 +39,29 @@ local function readFile(path)
     return s:gsub('%s+$', '')
 end
 
-function M.short(sha)
-    sha = tostring(sha or ''):gsub('%s+', '')
-    if sha == '' then return '' end
-    return sha:sub(1, 7)
+function M.parseVer(body)
+    body = tostring(body or '')
+    if body == '' or body:find('404:', 1, true) or body:find('<', 1, true) then
+        return ''
+    end
+    local line = body:match('^%s*([^\r\n]+)') or ''
+    return line:match('(%d+%.%d+%.%d+)') or ''
 end
 
-function M.currentSha()
-    return readFile(luaDir() .. '\\vft\\.rev')
+function M.display(v)
+    return tostring(v or ''):gsub('%s+', '')
+end
+
+function M.current()
+    local now = os.clock()
+    if (now - currentAt) < 2 then return currentCache end
+    local dir = luaDir()
+    currentCache = M.parseVer(readFile(dir .. '\\vft\\version.txt'))
+    if currentCache == '' then
+        currentCache = M.parseVer(readFile(dir .. '\\vft\\.rev'))
+    end
+    currentAt = now
+    return currentCache
 end
 
 function M.busy()
@@ -54,99 +71,77 @@ end
 local PS = [=[
 param(
     [Parameter(Mandatory = $true)][string]$LuaDir,
-    [Parameter(Mandatory = $true)][string]$OutFile,
-    [ValidateSet('check','update')][string]$Mode = 'update'
+    [Parameter(Mandatory = $true)][string]$OutFile
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-} catch {}
-
 function Write-Status([string]$line) {
     Set-Content -Path $OutFile -Value $line -Encoding ascii
 }
-
 Write-Status 'run'
 $LuaDir = [IO.Path]::GetFullPath($LuaDir)
-if (-not (Test-Path $LuaDir)) {
-    Write-Status "err lua dir missing"
-    exit 1
-}
-
+if (-not (Test-Path $LuaDir)) { Write-Status "err lua dir missing"; exit 1 }
 $repo = 'belvue/veilfall-triune'
 $branch = 'main'
 $token = $env:VF_GITHUB_TOKEN
-$headers = @('-sL', '-H', 'User-Agent: VF')
+$headers = @('-sL', '-H', 'User-Agent: VF-Update')
 if ($token) { $headers += @('-H', "Authorization: Bearer $token") }
-
 $tmp = Join-Path $env:TEMP ('vfup-' + [guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
+function Get-Ver([string]$url) {
+    $f = Join-Path $tmp 'ver.txt'
+    & curl.exe @headers --max-time 15 -o $f $url
+    if ($LASTEXITCODE -ne 0) { return '' }
+    $raw = Get-Content $f -Raw -ErrorAction SilentlyContinue
+    if (-not $raw) { return '' }
+    if ($raw -match '404:') { return '' }
+    if ($raw -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+    return ''
+}
 try {
-    $apiFile = Join-Path $tmp 'sha.json'
-    $apiUrl = "https://api.github.com/repos/$repo/commits/$branch"
-    & curl.exe @headers -o $apiFile $apiUrl
-    if ($LASTEXITCODE -ne 0) { throw "curl sha $LASTEXITCODE" }
-    $json = Get-Content $apiFile -Raw -ErrorAction SilentlyContinue
-    if (-not $json) { throw 'empty sha response' }
-    if ($json -match 'API rate limit exceeded') { throw 'GitHub rate limit' }
-    if ($json -notmatch '"sha"\s*:\s*"([0-9a-f]{40})"') { throw 'no sha in response' }
-    $sha = $Matches[1]
-
-    if ($Mode -eq 'check') {
-        Write-Status "ok sha $sha"
-        exit 0
-    }
-
-    $revFile = Join-Path $LuaDir 'vft\.rev'
+    $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/version.txt"
+    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md" }
+    $verFile = Join-Path $LuaDir 'vft\version.txt'
     $old = ''
-    if (Test-Path $revFile) { $old = (Get-Content $revFile -Raw).Trim() }
-    if ($old -eq $sha) {
-        Write-Status "ok up-to-date $sha"
-        exit 0
-    }
-
+    if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
+    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] }
+    if ($rel -and $old -eq $rel) { Write-Status "ok up-to-date $rel"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
-    $zipUrl = "https://codeload.github.com/$repo/zip/refs/heads/$branch"
-    & curl.exe @headers -o $zip $zipUrl
+    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
     if (-not (Test-Path $zip) -or ((Get-Item $zip).Length -lt 1000)) { throw 'zip too small' }
-
     & tar.exe -xf $zip -C $tmp
     if ($LASTEXITCODE -ne 0) { throw "tar $LASTEXITCODE" }
-
     $srcRoot = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'veilfall-triune-*' } | Select-Object -First 1
     if (-not $srcRoot) { throw 'zip layout' }
     $luaSrc = Join-Path $srcRoot.FullName 'lua'
-    $vfSrc = Join-Path $luaSrc 'vf.lua'
-    if (-not (Test-Path $vfSrc)) { throw 'zip has no lua/vf.lua' }
-
+    if (-not (Test-Path (Join-Path $luaSrc 'vf.lua'))) { throw 'zip has no lua/vf.lua' }
     foreach ($name in @('vf.lua', 'vft.lua', 'vfup.lua')) {
         $from = Join-Path $luaSrc $name
-        if (Test-Path $from) {
-            Copy-Item $from (Join-Path $LuaDir $name) -Force
-        }
+        if (Test-Path $from) { Copy-Item $from (Join-Path $LuaDir $name) -Force }
     }
-
     $vftSrc = Join-Path $luaSrc 'vft'
     $vftDst = Join-Path $LuaDir 'vft'
     if (Test-Path $vftSrc) {
         New-Item -ItemType Directory -Path $vftDst -Force | Out-Null
         Get-ChildItem $vftSrc -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Substring($vftSrc.Length).TrimStart('\', '/')
-            if ($rel -match '^[\\/]?config[\\/]' -and $_.Extension -match '\.(ini|old|tmp)$') { return }
+            $relPath = $_.FullName.Substring($vftSrc.Length).TrimStart('\', '/')
+            if ($relPath -match '^[\\/]?config[\\/]' -and $_.Extension -match '\.(ini|old|tmp)$') { return }
             if ($_.Name -eq '.rev') { return }
-            $dest = Join-Path $vftDst $rel
+            $dest = Join-Path $vftDst $relPath
             $parent = Split-Path $dest
             if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
             Copy-Item $_.FullName $dest -Force
         }
     }
-
-    $revDir = Split-Path $revFile
-    if (-not (Test-Path $revDir)) { New-Item -ItemType Directory -Path $revDir -Force | Out-Null }
-    Set-Content -Path $revFile -Value $sha -Encoding ascii -NoNewline
-    Write-Status "ok updated $sha"
+    if ($rel -and -not (Test-Path $verFile)) {
+        $verDir = Split-Path $verFile
+        if (-not (Test-Path $verDir)) { New-Item -ItemType Directory -Path $verDir -Force | Out-Null }
+        Set-Content -Path $verFile -Value $rel -Encoding ascii -NoNewline
+    }
+    $got = $rel
+    if (Test-Path $verFile) { $got = (Get-Content $verFile -Raw).Trim() }
+    Write-Status ("ok updated " + $got)
     exit 0
 } catch {
     Write-Status ("err " + $_.Exception.Message)
@@ -156,9 +151,21 @@ try {
 }
 ]=]
 
-local function startJob(mode)
+local function spawnCurlCheck(url)
+    local out = tempDir() .. '\\vf-ver.txt'
+    pcall(os.remove, out)
+    job = { mode = 'check', out = out, at = os.clock(), limit = 12, url = url }
+    M.note = 'checking…'
+    M.err = ''
+    -- VF: Lua os.execute is already cmd /c. start "" returns now; curl is the click.
+    os.execute(string.format(
+        'start "" /min curl.exe -sL --max-time 10 -A VF-Update -o "%s" "%s"',
+        out:gsub('"', ''),
+        url))
+end
+
+local function startUpdateJob()
     if job then return false end
-    mode = (mode == 'check') and 'check' or 'update'
     local dest = luaDir()
     local tmp = tempDir()
     local ps1 = tmp .. '\\vfup.ps1'
@@ -171,106 +178,118 @@ local function startJob(mode)
     end
     f:write(PS)
     f:close()
-    job = {
-        mode = mode,
-        ps1 = ps1,
-        out = out,
-        at = os.clock(),
-        limit = (mode == 'check') and 25 or 90,
-    }
+    job = { mode = 'update', ps1 = ps1, out = out, at = os.clock(), limit = 90 }
     M.err = ''
-    M.note = (mode == 'check') and 'checking…' or 'updating…'
-    -- VF: start returns immediately so the Manager draw does not freeze on the zip.
+    M.note = 'updating…'
     os.execute(string.format(
-        'cmd /c start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s" -Mode %s',
+        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s"',
         ps1:gsub('"', ''),
         dest:gsub('"', ''),
-        out:gsub('"', ''),
-        mode))
+        out:gsub('"', '')))
     return true
 end
 
 function M.reloadVf()
-    -- VF: /timed is deciseconds. stop now, run in 1s so the VM is gone first.
     pcall(function()
         mq.cmd('/multiline ; /vf pause; /lua stop vf; /timed 10 /lua run vf')
     end)
 end
 
-local function finish(result)
-    local mode = job and job.mode or ''
+local function finishCheck()
+    local body = job and readFile(job.out) or ''
+    local tryReadme = job and job.url ~= README_URL
+    job = nil
+    local ver = M.parseVer(body)
+    if ver ~= '' then
+        M.release = ver
+        M.err = ''
+        M.note = (ver == M.current()) and 'up to date' or ''
+        return
+    end
+    if tryReadme then
+        spawnCurlCheck(README_URL)
+        return
+    end
+    M.note = ''
+    M.err = (body == '') and 'check timed out' or 'could not read GitHub version'
+end
+
+local function takeVer(result)
+    return M.parseVer(result) ~= '' and M.parseVer(result) or (result:match('(%d+%.%d+%.%d+)%s*$') or '')
+end
+
+local function finishUpdate(result)
     local ps1 = job and job.ps1
     local out = job and job.out
     job = nil
     if ps1 then pcall(os.remove, ps1) end
     if out then pcall(os.remove, out) end
-    if result:find('^ok sha ') then
-        M.releaseSha = result:match('(%x+)$') or M.releaseSha
-        checkedAt = os.clock()
-        M.note = ''
-        M.err = ''
-        return
-    end
+    currentAt = -1
+    local ver = takeVer(result)
     if result:find('^ok up%-to%-date') then
-        M.releaseSha = result:match('(%x+)$') or M.releaseSha
-        checkedAt = os.clock()
+        if ver ~= '' then
+            M.release = ver
+        end
         M.note = 'up to date'
         M.err = ''
         return
     end
     if result:find('^ok updated') then
-        M.releaseSha = result:match('(%x+)$') or M.releaseSha
-        checkedAt = os.clock()
+        if ver ~= '' then
+            M.release = ver
+        end
         M.note = ''
         M.err = ''
         M.reloadVf()
         return
     end
+    M.note = ''
     if result:sub(1, 4) == 'err ' then
         M.err = result:sub(5)
-        M.note = ''
         return
     end
-    if result ~= '' and result ~= 'run' then
-        M.err = result
-        M.note = ''
-        return
-    end
-    if mode == 'update' then
-        M.err = 'update failed'
-        M.note = ''
-    else
-        M.err = 'check failed'
-        M.note = ''
-    end
+    M.err = (result ~= '' and result ~= 'run') and result or 'update failed'
 end
 
 function M.tick()
     if not job then return end
+    if job.mode == 'check' then
+        local body = readFile(job.out)
+        if M.parseVer(body) ~= '' then
+            finishCheck()
+            return
+        end
+        if body:find('404:', 1, true) then
+            finishCheck()
+            return
+        end
+        if (os.clock() - job.at) > (job.limit or 12) then
+            finishCheck()
+        end
+        return
+    end
     local result = readFile(job.out)
     if result ~= '' and result ~= 'run' then
-        finish(result)
+        finishUpdate(result)
         return
     end
     if (os.clock() - job.at) > (job.limit or 90) then
-        finish('err timed out')
+        finishUpdate('err timed out')
     end
 end
 
-function M.ensureCheck()
+function M.startCheck()
     if job then return end
-    if M.releaseSha ~= '' and (os.clock() - checkedAt) < 120 then return end
-    startJob('check')
+    spawnCurlCheck(VER_URL)
 end
 
 function M.startUpdate()
     if job then return end
-    startJob('update')
+    startUpdateJob()
 end
 
--- VF: /lua run vfup. Blocks this VM only; Manager uses startUpdate + tick.
 function M.runCli()
-    if not startJob('update') then
+    if not startUpdateJob() then
         print('\ag[VF]\ax \ar' .. (M.err ~= '' and M.err or 'update failed'))
         return
     end
@@ -286,10 +305,10 @@ function M.runCli()
         return
     end
     if M.note == 'up to date' then
-        print('\ag[VF]\ax up to date ' .. M.short(M.releaseSha))
+        print('\ag[VF]\ax up to date ' .. M.display(M.release))
         return
     end
-    print('\ag[VF]\ax updated ' .. M.short(M.releaseSha))
+    print('\ag[VF]\ax updated ' .. M.display(M.release))
     M.reloadVf()
 end
 
