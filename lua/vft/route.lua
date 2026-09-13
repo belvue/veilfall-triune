@@ -1,6 +1,7 @@
 -- VF: zone route data and cursor. No movement commands. See docs/MOVE_REFACTOR.md.
 
 local mq = require('mq')
+local MapLocs = require('vft.maplocs')
 
 local M = {}
 
@@ -61,6 +62,9 @@ function M.install(runtime, api)
         end
         -- VF: routes never set ctrl.camp_loc. See docs/ANCHOR.md.
         if kind ~= 'loop' then runtime.nav.pin = 1 end
+        -- VF: X on the map is N:Kind. Same paint the waypoints bar uses.
+        local locs = pack and pack.locs
+        MapLocs.paint(locs, R.zone())
     end
 
     function R.kind(loc)

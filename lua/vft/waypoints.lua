@@ -7,6 +7,7 @@ local brand = require('vft.brand')
 local S = require('vft.mgr.schema')
 local IO = require('vft.mgr.io')
 local U = require('vft.mgr.util')
+local MapLocs = require('vft.maplocs')
 
 local theme = { colN = 0, varN = 0 }
 local TAB_ON = { 0.290, 0.140, 0.510, 1 }
@@ -122,7 +123,7 @@ end
 local state = {
     open = true,
     ignoreZ = false,
-    locsOpen = false,
+    locsOpen = true,
     locNumEdit = nil,
     routes = S.emptyRoutes(),
     routeLib = S.emptyRouteLib(),
@@ -136,6 +137,7 @@ local state = {
     backedUp = false,
     hydratedName = nil,
     lastFileAt = 0,
+    hydratedSig = '',
 }
 
 -- VF: nearest loc by stand dist. Flat pins and Ignore Z both use XY only.
@@ -181,6 +183,15 @@ local function zonePack()
     return state.routes.zones[zone], zone
 end
 
+local function locSig(pack, zone)
+    return MapLocs.sig(pack and pack.locs, zone)
+end
+
+local function paintPins()
+    local pack, zone = zonePack()
+    MapLocs.paint(pack and pack.locs, zone)
+end
+
 local function mqLeaving()
     local leaving = false
     pcall(function()
@@ -191,7 +202,8 @@ end
 
 local function refreshEntry(force)
     local now = os.clock()
-    if not force and (now - state.lastFileAt) < 2.0 then
+    -- VF: 0.25s so Ctrl+click / engine adds land in the list without a 2s stall.
+    if not force and (now - state.lastFileAt) < 0.25 then
         state.charName = IO.charName()
         state.dead = IO.isDeadOrCorpse(state.charName)
         return
@@ -213,20 +225,27 @@ end
 
 local function hydrateIfNeeded(force)
     local nm = state.charName
-    if not force and nm == state.hydratedName then return end
+    local z = zoneShort()
+    local pack = (state.charEntry and state.charEntry.waypoints
+        and state.charEntry.waypoints.zones and z ~= '')
+        and state.charEntry.waypoints.zones[z] or nil
+    local sig = locSig(pack, z)
+    if not force and nm == state.hydratedName and sig == state.hydratedSig then return end
     state.hydratedName = nm
+    state.hydratedSig = sig
     local rawWp = state.charEntry and state.charEntry.waypoints
     state.routes = S.copyRoutes(rawWp)
-    local z = zoneShort()
-    state.routeLibZone = z
-    state.routeLib = IO.loadRouteLib(z)
-    if z ~= '' then
-        if type(state.routes.zones[z]) ~= 'table' then
-            state.routes.zones[z] = S.copyRoutePack(nil)
+    local zone = zoneShort()
+    state.routeLibZone = zone
+    state.routeLib = IO.loadRouteLib(zone)
+    if zone ~= '' then
+        if type(state.routes.zones[zone]) ~= 'table' then
+            state.routes.zones[zone] = S.copyRoutePack(nil)
         end
-        state.routes.liveZone = z
-        state.routes.zone = z
+        state.routes.liveZone = zone
+        state.routes.zone = zone
     end
+    paintPins()
 end
 
 local function flushRoutes()
@@ -276,6 +295,7 @@ local function applyRoutePreset(item)
     local nextPack = S.copyRoutePack(item.pack)
     nextPack.lib_id = item.id
     state.routes.zones[zone] = nextPack
+    paintPins()
     return flushRoutes()
 end
 
@@ -323,6 +343,8 @@ local function addKind(kind)
     loc.kind = kind
     pack.locs = pack.locs or {}
     pack.locs[#pack.locs + 1] = loc
+    state.locsOpen = true
+    paintPins()
     flushRoutes()
     syncNamedRoute()
     print(string.format('\ag[VF WP]\ax %s loc %d added -- %s (Y:%.1f X:%.1f%s).',
@@ -350,6 +372,7 @@ local function moveNearestLoc()
     loc.z = fresh.z
     loc.kind = kind
     pack.locs[idx] = loc
+    paintPins()
     flushRoutes()
     syncNamedRoute()
     print(string.format('\ag[VF WP]\ax moved loc #%d to Y:%.1f X:%.1f%s.',
@@ -619,6 +642,7 @@ local function drawLocsWindow()
                 S.moveLoc(pack.locs, moveFrom, moveTo)
             end
             if removeAt or moveFrom or kindChanged then
+                paintPins()
                 flushRoutes()
                 syncNamedRoute()
             end
@@ -678,6 +702,8 @@ local function tick()
             state.routeLibZone = z
             state.routeLib = IO.loadRouteLib(z)
             hydrateIfNeeded(true)
+        else
+            paintPins()
         end
     end
 end
