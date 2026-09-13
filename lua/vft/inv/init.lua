@@ -1,5 +1,5 @@
 ---@diagnostic disable: undefined-global, undefined-field
--- VF: Inventory satellite. /lua run vft/inv
+-- VF: Inventory satellite. /lua run vft/inv  (also /vf inv, /vfinv)
 
 local mq = require('mq')
 local chat = require('vft.chat')

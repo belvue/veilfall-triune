@@ -136,21 +136,30 @@ function M.install(runtime, api)
         W.displaced('summoned')
     end
 
-    -- VF: pin is hot if something around you wants a fight. Not XTarget.
+    -- VF: pin is hot if the hate list still has us, or something around the pin
+    -- VF: wants a fight. closestThreat is a picker (LoS); it is not "hate is clear".
     local function rushSwarm()
+        local band = (runtime.rushHateBand and runtime.rushHateBand()) or (runtime.rushNear or W.RANGE.fight)
+        local hate = 0
+        if runtime.rushHate then
+            hate = tonumber(runtime.rushHate()) or 0
+        elseif runtime.aggroOnMe and runtime.aggroOnMe(band) then
+            hate = 1
+        end
+        if hate > 0 then return true, hate end
         local pack = 0
         if runtime.countPackMobs then
             pack = tonumber(runtime.countPackMobs(W.RANGE.fight)) or 0
         end
-        if pack > 0 then return true, pack end
+        if pack > 0 then return true, 0 end
         if runtime.closestThreat and runtime.closestThreat(W.RANGE.fight) then
-            return true, 1
+            return true, 0
         end
         local swinging = false
         pcall(function()
             if mq.TLO.Me.Combat() then swinging = true end
         end)
-        return swinging, pack
+        return swinging, 0
     end
 
     local function fearedNow()
@@ -415,8 +424,10 @@ function M.install(runtime, api)
 
         if pinKind == 'guide' then
             -- VF: Mid-summon / displace on a Guide must not wipe the fight latch and keep rushing.
+            -- VF: live haters (not pin pack) also hold — roll-through with aggro was leaving adds.
             local holdFight = runtime.nav.fighting or runtime.nav.reanchor
                 or ((runtime.nav.displaceHoldUntil or 0) > os.clock())
+                or (tonumber(hate) or 0) > 0
             if not holdFight then
                 runtime.nav.fighting = false
                 if runtime.markHuntLoc then runtime.markHuntLoc(wp) end
@@ -451,7 +462,10 @@ function M.install(runtime, api)
                 runtime.nav.engaged = true
                 if runtime.markHuntLoc then runtime.markHuntLoc(wp) end
                 local near = runtime.rushNear or W.RANGE.fight
-                local reach = runtime.closestThreat and runtime.closestThreat(near)
+                local chase = (runtime.rushHateBand and runtime.rushHateBand()) or near
+                local reach = (runtime.closestHater and runtime.closestHater(chase))
+                    or (runtime.closestMobOnMe and runtime.closestMobOnMe(chase))
+                    or (runtime.closestThreat and runtime.closestThreat(near))
                 if reach or mq.TLO.Me.Combat() then
                     runtime.nav.reachAt = os.clock()
                 elseif (os.clock() - (runtime.nav.reachAt or runtime.nav.arrivedAt or os.clock()))

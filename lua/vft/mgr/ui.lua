@@ -1322,12 +1322,12 @@ local function drawAAPurchase(state)
     end)
 end
 
--- VF: boolean MQ2Melee ability toggles — live meleemvi; flips inject /melee key=0|1.
--- VF: default font (Spells/Abilities), not AA's 0.82 scale; wrap to a new column every N rows.
+-- VF: per-character MQ2Melee toggles. Checkbox /melee + ini; Save writes loadout.melee_abilities.
+-- VF: /melee Write() is chat-only (MQ2Melee.cpp:2751) — never persist via the plugin.
 local function drawMeleeAbilities(state, actions)
     actions = actions or {}
-    textMuted('Live MQ2Melee state. Checkbox issues /melee key=0|1 (ini + reload only if if= gates change).')
-    local rows = MeleeCat.visibleRows(nil)
+    textMuted('This character. Checkbox writes /melee and the ini; Save stores them in the loadout.')
+    local rows = MeleeCat.visibleRows(state.meleeAbilities)
     if #rows == 0 then
         textMuted('No owned melee abilities for this character.')
         return
@@ -1345,7 +1345,7 @@ local function drawMeleeAbilities(state, actions)
                 local col = math.floor((i - 1) / PER_COL)
                 local rowIn = (i - 1) % PER_COL
                 ImGui.SetCursorPos(originX + col * COL_W, originY + rowIn * ROW_H)
-                local on = MeleeCat.readLive(row.key) > 0
+                local on = row.on
                 local hit = ImGui.Checkbox('##meleeAb_' .. row.key, on)
                 if hit ~= on then
                     if actions.meleeSet then
@@ -1354,6 +1354,7 @@ local function drawMeleeAbilities(state, actions)
                         pcall(function()
                             mq.cmdf('/melee %s=%s', row.key, hit and '1' or '0')
                         end)
+                        pcall(function() MeleeCat.patchIniAbility(row.key, hit) end)
                     end
                 end
                 ImGui.SameLine()
@@ -1731,7 +1732,7 @@ local function drawCombat(state)
     ImGui.SameLine()
     ImGui.BeginGroup()
 
-    -- VF: Roam only, and labeled so. Rush is the face pull and reads none of this.
+    -- VF: Roam only. Rush ignores this. Facepull is the walk-up swing.
     ImGui.Text('Pulling')
     ImGui.Separator()
     textMuted('Roam only. Rush walks in and tags by hand.')
@@ -1749,7 +1750,7 @@ local function drawCombat(state)
     ImGui.Text('Pull with')
     if ImGui.IsItemHovered() then
         setTooltip('Spell casts the gem below. Ranged throws, then falls back to a bow.\n'
-            .. 'Pet sends the pet in. All three tag from range and bring it to you.')
+            .. 'Pet sends the pet in. Facepull runs up and swings -- no tag.')
     end
 
     if pull.style == 'Spell' then
@@ -1778,21 +1779,23 @@ local function drawCombat(state)
         ImGui.Text('Gem')
     end
 
-    ImGui.SetNextItemWidth(160)
-    do
-        local v = ImGui.SliderInt('##vfPullEngage', pull.engage or 100, 15, 250)
-        pull.engage = tonumber(v) or pull.engage
-    end
-    ImGui.SameLine()
-    ImGui.Text('Tag from')
-    if ImGui.IsItemHovered() then
-        setTooltip('Close to this range before tagging.')
-    end
+    if pull.style ~= 'Facepull' then
+        ImGui.SetNextItemWidth(160)
+        do
+            local v = ImGui.SliderInt('##vfPullEngage', pull.engage or 100, 15, 250)
+            pull.engage = tonumber(v) or pull.engage
+        end
+        ImGui.SameLine()
+        ImGui.Text('Tag from')
+        if ImGui.IsItemHovered() then
+            setTooltip('Close to this range before tagging.')
+        end
 
-    pull.stand_back = ImGui.Checkbox('Hold at range##vfPullStand', pull.stand_back == true)
-    if ImGui.IsItemHovered() then
-        setTooltip('Do not close after tagging -- stay at Tag from and let the pet\n'
-            .. 'or your ranged attacks work. Ignored outside Roam.')
+        pull.stand_back = ImGui.Checkbox('Hold at range##vfPullStand', pull.stand_back == true)
+        if ImGui.IsItemHovered() then
+            setTooltip('Do not close after tagging -- stay at Tag from and let the pet\n'
+                .. 'or your ranged attacks work. Ignored outside Roam.')
+        end
     end
 
     ImGui.Dummy(0, 10)

@@ -182,9 +182,6 @@ function M.install(runtime, api)
                 print(string.format('\ay[VF]\ax Roam target acquired: #%d (%s) dist %.1f',
                     id, tostring(mq.TLO.Target.CleanName()), distToId(id)))
             elseif not (packCount and packCount(runtime.rushNear or 80) > 0) then
-                if (runtime.meshPathFails or 0) > 0 and not isMoveActive() then
-                    runtime.meshPathFails = 0
-                else
                     if pursuit.wanderLoc then
                         pursuit.wanderLoc = nil
                         if mq.TLO.Navigation.Active() then mq.cmd('/nav stop') end
@@ -219,7 +216,6 @@ function M.install(runtime, api)
                             '\ay[VF]\ax Roam: No NPCs found (Lvl %d-%d, Radius %d, Max Z %d, Floor Z %d%s). Waiting...',
                             minLv, maxLv, radius, zDiff, zPlane, anchorKey))
                     end
-                end
             end
             end
         end
@@ -239,8 +235,9 @@ function M.install(runtime, api)
 
         if haveNPC then
             local id = mq.TLO.Target.ID()
-            -- VF: every pull style is ranged. Walking up and swinging is Rush.
+            -- VF: Facepull walks in and swings. Spell/Pet/Ranged tag at range.
             local pullStyle = ctrl.pull_style or 'Spell'
+            local facepull = (pullStyle == 'Facepull')
 
             -- VF: Pet pull: dispatch pets while navigating (don't wait for arrival).
             if pullStyle == 'Pet' and (os.clock() - (runtime.lastPetPullAt or 0)) > 3.0 then
@@ -253,15 +250,30 @@ function M.install(runtime, api)
                 end
             end
 
-            -- VF: close to tag range, then desiredRange for combat_style once it bites.
+            -- VF: Facepull closes to melee. Other styles close to Tag from, then desiredRange once tagged.
             local reqRange
-            if not (wantsFight and wantsFight(id)) and not mq.TLO.Me.Combat() then
-                reqRange = ctrl.pull_engage_dist or 100
-            else
+            if facepull or (wantsFight and wantsFight(id)) or mq.TLO.Me.Combat() then
                 reqRange = desiredRange(id)
+            else
+                reqRange = ctrl.pull_engage_dist or 100
             end
 
             local onMe = runtime.spawnIsOnMe and runtime.spawnIsOnMe(id)
+            -- VF: Facepull — LoS → AssistOn /stick this tick; no LoS → /nav. Do not nav a visible spawn.
+            if facepull then
+                local d = distToId(id)
+                local maxEng = (runtime.maxEngageDistance and runtime.maxEngageDistance()) or (ctrl.xtar_nav_dist or 150)
+                local losOk = onMe or (runtime.pickLosOk and runtime.pickLosOk(id, d))
+                    or (hasLoS and hasLoS(id))
+                if losOk and d <= maxEng then
+                    engage = true
+                    if runtime.assistOn then
+                        runtime.assistOn(id)
+                    end
+                else
+                    moveToward(id, reqRange)
+                end
+            else
             local arrived
             if onMe then
                 stopMoving()
@@ -276,8 +288,9 @@ function M.install(runtime, api)
             else
                 arrived = moveToward(id, reqRange)
             end
+            local tagRange = ctrl.pull_engage_dist or 100
             local inRange = arrived
-                or (distToId(id) <= (ctrl.pull_engage_dist or 100) and (hasLoS(id) or onMe))
+                or (distToId(id) <= tagRange and (hasLoS(id) or onMe))
 
             if inRange then
                 if pullStyle == 'Spell' then
@@ -352,6 +365,7 @@ function M.install(runtime, api)
                 if distToId(id) <= (ctrl.xtar_nav_dist or 150) and hasLoS(id) then
                     engage = true
                 end
+            end
             end
         end
         return haveNPC, engage

@@ -1017,11 +1017,10 @@ end
 -- VF: no filtersSummary / zoneNames. Both were exported and never called -- the
 -- VF: Filters tab iterates state.filters directly.
 
--- VF: pulling is always at range. Walking up and hitting it is Rush's whole job,
--- VF: so a 'Melee' pull was a second face-pull that only Roam could reach. A saved
--- VF: 'Melee' fails the set below and falls back to 'Spell'.
-local PULL_STYLES = { 'Spell', 'Ranged', 'Pet' }
-local PULL_STYLE_SET = { Spell = true, Ranged = true, Pet = true }
+-- VF: Spell/Ranged/Pet tag at range. Facepull walks in and swings (Roam only).
+-- VF: A saved 'Melee' fails the set below and falls back to 'Spell'.
+local PULL_STYLES = { 'Spell', 'Ranged', 'Pet', 'Facepull' }
+local PULL_STYLE_SET = { Spell = true, Ranged = true, Pet = true, Facepull = true }
 
 local function defaultPull()
     return {
@@ -1051,6 +1050,7 @@ local function copyPull(src)
     else
         pull.stand_back = false
     end
+    if pull.style == 'Facepull' then pull.stand_back = false end
     return pull
 end
 
@@ -1855,8 +1855,13 @@ local function migrateEntry(e)
         end
         e.spell_gates = gates
     end
-    -- VF: melee toggles live in MQ2Melee ini / meleemvi â€” drop any stale char-sheet copy.
-    e.melee_abilities = nil
+    -- VF: melee toggles live in loadout.melee_abilities and [MQ2Melee]. Keep both.
+    pcall(function()
+        local Cat = require('vft.mgr.melee_catalog')
+        if e.melee_abilities ~= nil then
+            e.melee_abilities = Cat.copyAbilities(e.melee_abilities)
+        end
+    end)
     return e
 end
 

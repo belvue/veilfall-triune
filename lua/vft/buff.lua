@@ -15,6 +15,8 @@ end
 function M.install(runtime, api)
     api = api or {}
     local barNameCache, barNameCacheAt = nil, 0
+    -- VF: buffs never drop except zone — once on the bar, do not re-harvest.
+    local zoneUp = {}
 
     local function spellNamesEqual(a, b)
         a, b = tostring(a or ''), tostring(b or '')
@@ -150,39 +152,74 @@ function M.install(runtime, api)
                 addBarName(into, n)
             end)
         end
-        harvestWindow(into, 'BuffWindow')
-        for i = 0, 41 do
-            pcall(function()
-                local c = mq.TLO.Window('BuffWindow').Child(string.format('Buff%d', i))
-                if c and c() then
-                    addBarName(into, c.Tooltip())
-                    addBarName(into, c.Text())
-                end
-            end)
-            pcall(function()
-                local c = mq.TLO.Window('BuffWindow').Child(string.format('BW_Buff%d_Button', i))
-                if c and c() then
-                    addBarName(into, c.Tooltip())
-                    addBarName(into, c.Text())
-                end
-            end)
-        end
-        for _, spec in ipairs(SHORT_WINS) do
-            harvestWindow(into, spec[1])
-            for _, fmt in ipairs(spec[2]) do
-                for i = 0, 41 do
-                    pcall(function()
-                        local c = mq.TLO.Window(spec[1]).Child(string.format(fmt, i))
-                        if c and c() then
-                            addBarName(into, c.Tooltip())
-                            addBarName(into, c.Text())
-                        end
-                    end)
+        -- VF: hot path is Me.Buff + Me.Song names. Window harvest is dump-only.
+        if force then
+            harvestWindow(into, 'BuffWindow')
+            for i = 0, 41 do
+                pcall(function()
+                    local c = mq.TLO.Window('BuffWindow').Child(string.format('Buff%d', i))
+                    if c and c() then
+                        addBarName(into, c.Tooltip())
+                        addBarName(into, c.Text())
+                    end
+                end)
+                pcall(function()
+                    local c = mq.TLO.Window('BuffWindow').Child(string.format('BW_Buff%d_Button', i))
+                    if c and c() then
+                        addBarName(into, c.Tooltip())
+                        addBarName(into, c.Text())
+                    end
+                end)
+            end
+            for _, spec in ipairs(SHORT_WINS) do
+                harvestWindow(into, spec[1])
+                for _, fmt in ipairs(spec[2]) do
+                    for i = 0, 41 do
+                        pcall(function()
+                            local c = mq.TLO.Window(spec[1]).Child(string.format(fmt, i))
+                            if c and c() then
+                                addBarName(into, c.Tooltip())
+                                addBarName(into, c.Text())
+                            end
+                        end)
+                    end
                 end
             end
         end
         barNameCache, barNameCacheAt = into, now
         return into
+    end
+
+    -- VF: only gems that are on the bar right now. Planned / unmemmed / disabled stay in the file.
+    local function liveGemRow(i, g)
+        if not g or g.enabled == false then return false end
+        if not g.spell or g.spell == '' then return false end
+        if api.isGemMatching then return api.isGemMatching(i, g.spell) and true or false end
+        local mem = ''
+        pcall(function() mem = mq.TLO.Me.Gem(i).Name() or '' end)
+        if mem == '' or mem == 'NULL' then return false end
+        return spellNamesEqual(mem, g.spell)
+    end
+
+    -- VF: keep_buff / stored clicky spell. FindItem only if the row has no name yet.
+    local function itemKeepSpell(name, it)
+        local keep = U.trimName(it and it.keep_buff or '')
+        if keep ~= '' then return keep end
+        local sp = U.trimName(it and it.spell or '')
+        if sp ~= '' then return sp end
+        if runtime.itemBuffSpell then return runtime.itemBuffSpell(name, it) or '' end
+        if runtime.itemClickSpell then return runtime.itemClickSpell(name, it) or '' end
+        return ''
+    end
+
+    local function markZoneUp(name)
+        local key = U.normalizeSpellName(name)
+        if key ~= '' then zoneUp[key] = true end
+    end
+
+    local function isZoneUp(name)
+        local key = U.normalizeSpellName(name)
+        return key ~= '' and zoneUp[key] == true
     end
 
     local function possessivePrefix(name)
@@ -198,12 +235,17 @@ function M.install(runtime, api)
     local function selfBarHasSpell(name)
         name = tostring(name or '')
         if name == '' then return false end
+        if isZoneUp(name) then return true end
         local bar = gatherSelfBarEffects()
         local decor = stripBarDecor(name)
-        if bar.set[name] or bar.set[name:lower()] then return true end
-        if bar.set[decor] or bar.set[decor:lower()] then return true end
-        if bar.set[U.cleanSpellName(name):lower()] or bar.set[U.normalizeSpellName(name)] then return true end
-        if bar.set[U.normalizeSpellName(decor)] then return true end
+        local function hit()
+            markZoneUp(name)
+            return true
+        end
+        if bar.set[name] or bar.set[name:lower()] then return hit() end
+        if bar.set[decor] or bar.set[decor:lower()] then return hit() end
+        if bar.set[U.cleanSpellName(name):lower()] or bar.set[U.normalizeSpellName(name)] then return hit() end
+        if bar.set[U.normalizeSpellName(decor)] then return hit() end
         local needle = decor:lower()
         local needleNorm = U.normalizeSpellName(decor)
         if needle == '' and needleNorm == '' then return false end
@@ -213,16 +255,16 @@ function M.install(runtime, api)
             local raws = tostring(raw)
             local rawDecor = stripBarDecor(raws):lower()
             local rawNorm = U.normalizeSpellName(raws)
-            if needle ~= '' and (raws:lower():find(needle, 1, true) or rawDecor == needle) then return true end
-            if needleNorm ~= '' and rawNorm == needleNorm then return true end
-            if needleNorm ~= '' and U.normalizeSpellName(rawDecor) == needleNorm then return true end
+            if needle ~= '' and (raws:lower():find(needle, 1, true) or rawDecor == needle) then return hit() end
+            if needleNorm ~= '' and rawNorm == needleNorm then return hit() end
+            if needleNorm ~= '' and U.normalizeSpellName(rawDecor) == needleNorm then return hit() end
             -- VF: Improved Familiar vs Improved Familiar: Permanent after punct strip.
             if needleNorm ~= '' and #rawNorm >= #needleNorm and rawNorm:sub(1, #needleNorm) == needleNorm then
                 local rest = rawNorm:sub(#needleNorm + 1)
-                if rest == 'permanent' or rest == '' then return true end
+                if rest == 'permanent' or rest == '' then return hit() end
             end
-            if pref ~= '' and possessivePrefix(raws) == pref then return true end
-            if wantSelo and rawNorm:find('selo', 1, true) then return true end
+            if pref ~= '' and possessivePrefix(raws) == pref then return hit() end
+            if wantSelo and rawNorm:find('selo', 1, true) then return hit() end
         end
         return false
     end
@@ -910,6 +952,7 @@ function M.install(runtime, api)
         runtime.buffZoneSettleUntil = os.clock() + 3
         barNameCache = nil
         barNameCacheAt = 0
+        zoneUp = {}
         if runtime.buffSessionClear then runtime.buffSessionClear() end
         -- VF: buffs never drop except zone — re-enter OOC so missing gems/clickies fire without a fight.
         if runtime.oocEnter and runtime.currentState and runtime.currentState() ~= 'combat' then
@@ -1048,7 +1091,7 @@ function M.install(runtime, api)
             end
             for i = 1, D.NUM_GEMS do
                 local g = loadout.gems[i]
-                if g and g.spell and g.spell ~= '' and idleColdRole(g)
+                if liveGemRow(i, g) and idleColdRole(g)
                     and (runtime.castRole(g) == 'Summon')
                     and not runtime.buffFactuallyUp(myId, g.spell)
                     and rowGates(g, g.spell, myId) then
@@ -1079,14 +1122,7 @@ function M.install(runtime, api)
         for name, it in pairs(loadout.items or {}) do
             if it and it.enabled and idleColdRole(it) then
                 local role = runtime.castRole(it)
-                local spellName = ''
-                if runtime.itemBuffSpell then
-                    spellName = runtime.itemBuffSpell(name, it) or ''
-                elseif runtime.itemClickSpell then
-                    spellName = runtime.itemClickSpell(name, it) or ''
-                elseif it.spell and it.spell ~= '' then
-                    spellName = it.spell
-                end
+                local spellName = itemKeepSpell(name, it)
                 if spellName ~= '' then
                     if role == 'PetBuff' and petId > 0
                         and not runtime.buffFactuallyUp(petId, spellName)
@@ -1106,7 +1142,7 @@ function M.install(runtime, api)
         if petId > 0 then
             for i = 1, D.NUM_GEMS do
                 local g = loadout.gems[i]
-                if g and g.spell and g.spell ~= '' and idleColdRole(g)
+                if liveGemRow(i, g) and idleColdRole(g)
                     and runtime.castRole(g) == 'PetBuff'
                     and not runtime.buffFactuallyUp(petId, g.spell)
                     and rowGates(g, g.spell, petId) then
@@ -1120,7 +1156,7 @@ function M.install(runtime, api)
 
         for i = 1, D.NUM_GEMS do
             local g = loadout.gems[i]
-            if g and g.spell and g.spell ~= '' and idleColdRole(g)
+            if liveGemRow(i, g) and idleColdRole(g)
                 and api.isIdleSelfBuff and api.isIdleSelfBuff(g.when, g.target) then
                 local role = runtime.castRole(g)
                 if role == 'Buff' or role == 'HoT' then
@@ -1202,22 +1238,15 @@ function M.install(runtime, api)
             if a and a.enabled and missing(a, name) then return true end
         end
         for name, it in pairs(loadout.items or {}) do
-            if it and it.enabled then
-                local spellName = ''
-                if runtime.itemBuffSpell then
-                    spellName = runtime.itemBuffSpell(name, it) or ''
-                elseif runtime.itemClickSpell then
-                    spellName = runtime.itemClickSpell(name, it) or ''
-                elseif it.spell and it.spell ~= '' then
-                    spellName = it.spell
-                end
+            if it and it.enabled and idleColdRole(it) then
+                local spellName = itemKeepSpell(name, it)
                 -- VF: never treat the item name as a buff window match.
                 if spellName ~= '' and missing(it, spellName) then return true end
             end
         end
         for i = 1, D.NUM_GEMS do
             local g = loadout.gems and loadout.gems[i]
-            if g and missing(g, g.spell) then return true end
+            if liveGemRow(i, g) and missing(g, g.spell) then return true end
         end
         return false
     end

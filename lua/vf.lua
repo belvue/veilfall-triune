@@ -24,7 +24,7 @@ local DATA, DATA_OK     = Boot.loadData(cfg, scriptDir)
 local lvlMin, lvlMax = 1, 65
 
 -- VF: gems[i] / aas[name] / discs[name] / items[name]. Items = MQ2Cast clickies.
-local loadout        = { gems = {}, aas = {}, discs = {}, items = {}, spell_gates = {} }
+local loadout        = { gems = {}, aas = {}, discs = {}, items = {}, spell_gates = {}, melee_abilities = {} }
 
 
 
@@ -1001,6 +1001,7 @@ runtime.assistStickCmd = function(id)
 end
 
 -- VF: restick if not Active or PAUSED. Never /nav. E3 ProcessCombat.
+-- VF: no LoS after that restick -> markUnreachable and drop. docs/COMBAT_OWNERS.md.
 runtime.stickToAssistTarget = function(id)
     id = tonumber(id) or 0
     if id <= 0 then return false end
@@ -1008,13 +1009,24 @@ runtime.stickToAssistTarget = function(id)
     if not stickLoaded() then return false end
     if runtime.navEscapedHold and runtime.navEscapedHold() then return false end
     local cmd = runtime.assistStickCmd(id)
+    local d = distToId(id)
+    if runtime.pickLosOk and not runtime.pickLosOk(id, d) then
+        if pursuit.assistLosRestuck == id then
+            if runtime.markUnreachable then runtime.markUnreachable(id) end
+            stopMoving()
+            return false
+        end
+        pursuit.assistLosRestuck = id
+    else
+        pursuit.assistLosRestuck = nil
+    end
     local active, status = false, ''
     pcall(function()
         active = not not mq.TLO.Stick.Active()
         status = tostring(mq.TLO.Stick.Status() or '')
     end)
     if active and status ~= 'PAUSED' and runtime.stickHolding(id)
-        and pursuit.assistCmd == cmd then
+        and pursuit.assistCmd == cmd and not pursuit.assistLosRestuck then
         return true
     end
     runtime.claimMover('combat')
@@ -1032,6 +1044,7 @@ runtime.stickToAssistTarget = function(id)
 end
 
 -- VF: E3 AssistOn. Face + stick hold + ensureAttack. No /nav on a fight spawn.
+-- VF: no LoS (and not on-me, >8u) -> refuse unless already stuck, then restick/drop.
 runtime.assistOn = function(id)
     id = tonumber(id) or 0
     if id <= 0 then return false end
@@ -1040,6 +1053,12 @@ runtime.assistOn = function(id)
     local maxEng = runtime.maxEngageDistance()
     local onMe = runtime.spawnIsOnMe and runtime.spawnIsOnMe(id)
     if d > maxEng and not onMe then return false end
+    if runtime.pickLosOk and not runtime.pickLosOk(id, d) then
+        if (pursuit.stickId == id) or (runtime.stickHolding and runtime.stickHolding(id)) then
+            return runtime.stickToAssistTarget(id)
+        end
+        return false
+    end
     if runtime.ensureAttack then runtime.ensureAttack(id) end
     if runtime.mayClose and not runtime.mayClose(id) then return true end
     return runtime.stickToAssistTarget(id)
@@ -1114,6 +1133,7 @@ local function stopMoving()
     pursuit.stickId = nil
     pursuit.stickPct = nil
     pursuit.assistCmd = nil
+    pursuit.assistLosRestuck = nil
     pcall(function()
         if mq.TLO.MoveTo and mq.TLO.MoveTo.Moving and mq.TLO.MoveTo.Moving() then
             mq.cmd('/moveto off')
@@ -1892,7 +1912,8 @@ local function collectEntry()
         waypoints = loadout.waypoints,
         aa_queue = loadout.aa_queue,
         aa_book = loadout.aa_book,
-        control = ctrl
+        control = ctrl,
+        melee_abilities = loadout.melee_abilities,
     }
 end
 local function applyEntry(e)
@@ -1928,6 +1949,14 @@ local function applyEntry(e)
     loadout.aa_book = nil
     pcall(function()
         loadout.aa_book = require('vft.mgr.schema').copyAaBook(e.aa_book)
+    end)
+    loadout.melee_abilities = {}
+    pcall(function()
+        local Cat = require('vft.mgr.melee_catalog')
+        loadout.melee_abilities = Cat.copyAbilities(e.melee_abilities)
+        if e.melee_abilities ~= nil then
+            runtime.meleeApplyLoadout = true
+        end
     end)
     if type(e.control) == 'table' then
         for k, v in pairs(e.control) do ctrl[k] = v end
@@ -2460,6 +2489,7 @@ function runtime.reloadLoadout(silent)
     runtime.lastSig = loadoutSig()
     runtime.autoDirty = false
     pcall(runtime.stickPush)
+    if runtime.meleeSync then runtime.meleeSync(true) end
     if not silent then print('\ag[VF]\ax loadout reloaded from disk.') end
     return true
 end
@@ -2472,7 +2502,7 @@ local function onCharacterChanged()
     -- VF: mutate in place ? modules hold loadout/ctrl refs from install.
     loadout.gems, loadout.aas, loadout.discs, loadout.items, loadout.spell_gates = {}, {}, {}, {}, {}
     loadout.off_limit, loadout.filters, loadout.waypoints = nil, nil, nil
-    loadout.aa_queue, loadout.aa_book = nil, nil
+    loadout.aa_queue, loadout.aa_book, loadout.melee_abilities = nil, nil, {}
     local fresh = defaultCtrl()
     for k in pairs(ctrl) do ctrl[k] = nil end
     for k, v in pairs(fresh) do ctrl[k] = v end
@@ -3486,7 +3516,8 @@ function runtime.closestThreat(radius, exclude, unmezzed, onMeOnly)
                     end
                     if not mezzed then
                         local d = s.Distance3D() or 999
-                        if d < bestD then
+                        -- VF: ClearXTargets. On-me may have no LoS (pickLosOk).
+                        if d < bestD and (not runtime.pickLosOk or runtime.pickLosOk(id, d)) then
                             bestD = d
                             bestId = id
                         end
@@ -3528,7 +3559,8 @@ function runtime.closestHostileNear(radius)
                     and not isUnreachable(id)
                     and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
                     local d = s.Distance3D() or 999
-                    if d < bestD then
+                    -- VF: ClearXTargets. On-me may have no LoS (pickLosOk).
+                    if d < bestD and (not runtime.pickLosOk or runtime.pickLosOk(id, d)) then
                         bestD = d
                         bestId = id
                     end
@@ -4502,7 +4534,7 @@ end
 desiredRange = function(id)
     -- VF: Roam only. Rush IS the face pull -- honoring stand-back there made it
     -- VF: hold at range and never grab aggro, driven by a setting Rush never shows.
-    if ctrl.mode == 'Roam' and ctrl.pull_stand_back then
+    if ctrl.mode == 'Roam' and ctrl.pull_stand_back and ctrl.pull_style ~= 'Facepull' then
         return ctrl.pull_engage_dist or 100
     end
     local style = ctrl and ctrl.combat_style or 'Melee'
@@ -4655,10 +4687,8 @@ local function moveToward(id, dist, followOnly)
     --]]
 
     -- VF: inside stick_handoff -- stick only. Never /nav (fat mesh flaps under the hull).
-    -- VF: EXCEPT with no LoS. A wall is the one thing /stick cannot solve -- it
-    -- VF: walks the crow line into it and Stick.Stopped reads as arrived. Nav is
-    -- VF: the only mover that paths around geometry, so let it through, and drop
-    -- VF: stick first or the two movers fight over the feet.
+    -- VF: EXCEPT with no LoS. Travel/ranged may nav around geometry. AssistOn never
+    -- VF: calls moveToward -- do not reintroduce combat /nav here.
     if not followOnly and d <= runtime.stickHandoff() then
         -- VF: Ranged past melee reach must nav to ranged_dist. /stick 70% is the face-bow.
         local bowHold = ctrl and ctrl.combat_style == 'Ranged' and d > maxMeleeDistance(id)
@@ -4670,18 +4700,22 @@ local function moveToward(id, dist, followOnly)
     end
 
     if navLoaded() then
+        local navActiveNow = false
+        pcall(function() navActiveNow = not not mq.TLO.Navigation.Active() end)
+        -- VF: already naving this spawn -- PathExists is a mesh query, not a pulse check.
+        if pursuit.lastNavTargetId == id and navActiveNow then
+            pursuit.wasNavActive = true
+            return false
+        end
         local ok = false
         pcall(function() ok = mq.TLO.Navigation.PathExists('id ' .. id)() end)
         if ok then
-            local navActiveNow = mq.TLO.Navigation.Active()
             if pursuit.wasNavActive and not navActiveNow then
                 pursuit.navStalls = pursuit.navStalls + 1
             end
             pursuit.wasNavActive = navActiveNow
-            if pursuit.lastNavTargetId ~= id or not navActiveNow then
-                mq.cmdf('/nav id %d distance=%d', id, math.floor(targetDist))
-                pursuit.lastNavTargetId = id
-            end
+            mq.cmdf('/nav id %d distance=%d', id, math.floor(targetDist))
+            pursuit.lastNavTargetId = id
             return false
         end
         -- VF: off-mesh hunt target is skipped, not walked through walls. followOnly falls through.
@@ -5032,6 +5066,10 @@ runtime.nextSwingId = function(exclude)
         local addId = select(1, runtime.lowestLevelNear(near, exclude))
         if addId and addId ~= exclude and runtime.spawnWantsFight(addId) then return addId end
     end
+    -- VF: haters on us first. closestThreat is "legal kill", not the hate list.
+    local onMe = (runtime.closestHater and runtime.closestHater(near))
+        or (runtime.closestMobOnMe and runtime.closestMobOnMe(near))
+    if onMe and onMe ~= exclude then return onMe end
     return runtime.closestThreat(near, exclude)
 end
 
@@ -5113,9 +5151,17 @@ runtime.swingLosOk = function(id, dist)
     if id <= 0 then return true end
     local d = tonumber(dist) or distToId(id)
     -- VF: point-blank readings flicker in melee; trust the distance under the trust
-    -- VF: range. Above it a false reading means geometry, and moveToward navs around.
+    -- VF: range. Above it a false reading is geometry. AssistOn refuses; do not /nav.
     if d <= LOS_TRUST_RANGE then return true end
     return hasLoS(id) and true or false
+end
+
+-- VF: ClearXTargets analogue. swingLosOk is the one LoS owner. On-me may have no LoS.
+runtime.pickLosOk = function(id, dist)
+    id = tonumber(id) or 0
+    if id <= 0 then return false end
+    if runtime.swingLosOk(id, dist) then return true end
+    return runtime.spawnIsOnMe and runtime.spawnIsOnMe(id) and true or false
 end
 
 -- VF: a hater we cannot kill or reach would otherwise hold every travel leg forever,
@@ -5260,7 +5306,7 @@ runtime.pulseMeleeAttack = function()
         end
     end
     -- VF: Roam only -- see desiredRange.
-    if ctrl.mode == 'Roam' and ctrl.pull_stand_back then return false end
+    if ctrl.mode == 'Roam' and ctrl.pull_stand_back and ctrl.pull_style ~= 'Facepull' then return false end
     -- VF: corpse → next wantsFight, then /attack on. Keep stick if already swinging.
     if runtime.chainSwing() then
         if mq.TLO.Me.Combat() and runtime.stickFollowTarget then
@@ -5324,14 +5370,19 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     local anchorLoc    = ctrl.hunter_combat_loc
     local anchorRadius = (anchorLoc and (ctrl.hunter_combat_radius or 0) or 0)
 
-    -- VF: Explicit Y/X handling to account for EQ's (Y, X) standard.
-    local function outsideAnchor(sy, sx)
+    -- VF: camp is a cylinder -- XY disk plus the same zLimit as the scan.
+    local function outsideAnchor(sy, sx, sz)
         if anchorRadius <= 0 or not anchorLoc then return false end
         local ay = anchorLoc.y or anchorLoc[1] or 0
         local ax = anchorLoc.x or anchorLoc[2] or 0
         local dy = sy - ay
         local dx = sx - ax
-        return (dx * dx + dy * dy) > (anchorRadius * anchorRadius)
+        if (dx * dx + dy * dy) > (anchorRadius * anchorRadius) then return true end
+        local az = anchorLoc.z or anchorLoc[3]
+        if az and sz and math.abs(sz - az) > (searchMaxZ or (ctrl.hunter_z or 75)) then
+            return true
+        end
+        return false
     end
 
     local defaultRadius = ctrl.hunter_radius or 1500
@@ -5353,15 +5404,19 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                 and (okZ and fz and math.abs(fz - myZ) <= maxZ)
                 and isPullAllowed(fs.CleanName())
                 and not isUnreachable(fightId)
-                and not outsideAnchor(fs.Y() or 0, fs.X() or 0) then
+                and not outsideAnchor(fs.Y() or 0, fs.X() or 0, fz) then
                 return fightId
             end
         end
     end
 
-    -- VF: 2.
+    -- VF: zradius is the floor gate. radius-only is XY, so stacked zones fill
+    -- VF: NearestSpawn with other floors and same-floor never appears. PathExists
+    -- VF: lies (docs/MOVE_REFACTOR.md) -- /nav still tries; unreachable marks later.
     local function scanSpawns(zLimit)
-        local search = string.format('npc targetable radius %d', radius)
+        zLimit = math.max(1, math.floor(tonumber(zLimit) or 1))
+        local search = string.format('npc targetable radius %d zradius %d', radius, zLimit)
+        local bestId, bestDz, bestD = nil, 1e12, 1e12
         for i = 1, 300 do
             local s = mq.TLO.NearestSpawn(i, search)
             if not (s and s()) then break end
@@ -5375,25 +5430,13 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                             local okZ, sz = pcall(function() return s.Z() end)
                             if okZ and sz and math.abs(sz - myZ) <= zLimit then
                                 local sy, sx = s.Y() or 0, s.X() or 0
-                                if not outsideAnchor(sy, sx) then
-                                    if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(sid) then
-                                        local pathOk = true
-                                        if navLoaded() then
-                                            local meshOk, meshLoaded = pcall(function() return mq.TLO.Navigation.MeshLoaded() end)
-                                            if meshOk and meshLoaded then
-                                                local dist = s.Distance3D() or 999
-                                                if dist > 25 then
-                                                    local hasPath = false
-                                                    local ok = pcall(function() hasPath = mq.TLO.Navigation.PathExists('id ' .. sid)() end)
-                                                    if ok and not hasPath then
-                                                        pathOk = false
-                                                        runtime.meshPathFails = (runtime.meshPathFails or 0) + 1
-                                                    end
-                                                end
-                                            end
-                                        end
-                                        if pathOk then
-                                            return sid
+                                if not outsideAnchor(sy, sx, sz) then
+                                    local d = s.Distance3D() or 999
+                                    if isPullAllowed(s.CleanName()) and isConAllowed(s) and not isUnreachable(sid)
+                                        and runtime.pickLosOk(sid, d) then
+                                        local dz = math.abs(sz - myZ)
+                                        if (not bestId) or dz + 1 < bestDz or (math.abs(dz - bestDz) <= 1 and d < bestD) then
+                                            bestId, bestDz, bestD = sid, dz, d
                                         end
                                     end
                                 end
@@ -5403,7 +5446,7 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
                 end
             end
         end
-        return nil
+        return bestId
     end
 
     -- VF: Z-plane pick: same floor first, then hunter_z.
@@ -5650,7 +5693,7 @@ runtime.whyFight = function()
             pulse = take(pulse, 'Group idle (no assist mob -- pulseMeleeAttack skips)')
         end
     end
-    if ctrl and ctrl.mode == 'Roam' and ctrl.pull_stand_back then
+    if ctrl and ctrl.mode == 'Roam' and ctrl.pull_stand_back and ctrl.pull_style ~= 'Facepull' then
         pulse = take(pulse, 'Roam pull_stand_back (melee block skipped)')
     end
     local st = runtime.currentState and runtime.currentState() or '?'
@@ -5679,6 +5722,16 @@ runtime.whyFight = function()
         d = distToId(tid)
         reach = maxMeleeDistance(tid) or 18
         los = hasLoS(tid)
+        if runtime.isUnreachable and runtime.isUnreachable(tid) then
+            atk = take(atk, 'unreachable (no LoS after restick or no path)')
+        end
+        if runtime.pickLosOk and not runtime.pickLosOk(tid, d) then
+            atk = take(atk, string.format('AssistOn LoS (no LoS, not on-me, dist=%.1f >8u)', d))
+        end
+        local maxEng = runtime.maxEngageDistance and runtime.maxEngageDistance() or 150
+        if d > maxEng and not (runtime.spawnIsOnMe and runtime.spawnIsOnMe(tid)) then
+            atk = take(atk, string.format('AssistOn past max engage (dist=%.1f max=%.0f)', d, maxEng))
+        end
         if not runtime.swingTargetLive(tid) then
             atk = take(atk, 'swingTargetLive (dead / ignore / not hostile)')
         end
@@ -5739,8 +5792,10 @@ runtime.whyFight = function()
         tostring(not not runtime.manualFightArmed),
         tostring(swinging), tostring(st)))
     print(string.format(
-        '  dist=%.1f reach=%.1f LoS=%s nav=%s mover=%s',
-        d, reach, tostring(los), tostring(navOn), tostring(runtime.mover)))
+        '  dist=%.1f reach=%.1f LoS=%s pickLos=%s nav=%s mover=%s',
+        d, reach, tostring(los),
+        tostring(tid > 0 and runtime.pickLosOk and runtime.pickLosOk(tid, d)),
+        tostring(navOn), tostring(runtime.mover)))
     print(string.format(
         '  stick Status=%s Active=%s Stopped=%s Paused=%s cmd=%s',
         stickSt, tostring(stickActive), tostring(stickStopped), tostring(stickPaused),
@@ -6215,9 +6270,44 @@ runtime.isSpawnPetOrPlayer = isSpawnPetOrPlayer
 runtime.isHostileTarget = isHostileTarget
 -- VF: Rush kills what is on the pin.
 runtime.rushNear = 80
--- VF: hate = how many around you want a fight. Slot count is not the source.
+-- VF: chase band for "still hated". Pin pack stays rushNear; this is the leash.
+runtime.rushHateBand = function()
+    local chase = (ctrl and tonumber(ctrl.xtar_nav_dist)) or 150
+    if chase < 1 then chase = 150 end
+    local near = runtime.rushNear or 80
+    if chase < near then chase = near end
+    return chase
+end
+-- VF: live Auto Haters in chase band. Not pack-that-wants-a-fight.
 runtime.rushHate = function()
-    return tonumber(countPackMobs(runtime.rushNear or 80)) or 0
+    local band = runtime.rushHateBand and runtime.rushHateBand() or 150
+    local n = 0
+    if runtime.xtargetHaters then
+        for id in pairs(runtime.xtargetHaters()) do
+            if isSpawnAlive(id) and distToId(id) <= band then
+                n = n + 1
+            end
+        end
+    end
+    if n == 0 and runtime.aggroOnMe and runtime.aggroOnMe(band) then
+        return 1
+    end
+    return n
+end
+-- VF: nearest live Auto Hater in band. Does not require spawnWantsFight.
+runtime.closestHater = function(radius)
+    radius = tonumber(radius) or (runtime.rushHateBand and runtime.rushHateBand()) or 150
+    local bestId, bestD = nil, radius + 1
+    if not runtime.xtargetHaters then return nil end
+    for id in pairs(runtime.xtargetHaters()) do
+        if isSpawnAlive(id) and not isGroupOrRaidMember(id) and not isSpawnPetOrPlayer(id) then
+            local d = distToId(id)
+            if d < bestD then
+                bestD, bestId = d, id
+            end
+        end
+    end
+    return bestId
 end
 -- VF: lowest-level hostile in range (Focus Adds). Tie-break nearer.
 runtime.lowestLevelNear = function(maxDist, excludeId)
@@ -6234,6 +6324,7 @@ runtime.lowestLevelNear = function(maxDist, excludeId)
         if isIgnored(s.CleanName()) then return end
         local dist = s.Distance3D() or 999
         if dist > maxDist then return end
+        if not runtime.pickLosOk(id, dist) then return end
         local lvl = tonumber(s.Level()) or 999
         if lvl < bestLvl or (lvl == bestLvl and dist < bestD) then
             bestLvl, bestD, bestId = lvl, dist, id
@@ -6254,7 +6345,8 @@ runtime.lowestLevelNear = function(maxDist, excludeId)
     end)
     return bestId, bestLvl
 end
--- VF: Manual/Pause: attack locks that target. Near+LoS = stick; far = travelIgnore.
+-- VF: Manual/Pause: attack locks that target. In-band + pickLosOk = AssistOn.
+-- VF: past max engage = travelIgnore. No LoS in band = refuse (do not nav the wall).
 -- VF: Focus Adds: re-pick lowest-level hostile in proximity (adds before boss).
 -- VF: armed=false -- target only, never moveToward / travel.
 runtime.manualProxFight = function(haveNPC, armed)
@@ -6303,7 +6395,7 @@ runtime.manualProxFight = function(haveNPC, armed)
         if tid > 0 and isHostileTarget(tid) and not isUnreachable(tid) then
             runtime.manualCommitId = tid
             commit = tid
-            print(string.format('\ay[VF]\ax Manual commit #%d (%s) -- near stick / far travelIgnore.',
+            print(string.format('\ay[VF]\ax Manual commit #%d (%s) -- LoS AssistOn / past max travel / no LoS refuse.',
                 tid, tostring(mq.TLO.Target.CleanName())))
         end
     end
@@ -6319,14 +6411,15 @@ runtime.manualProxFight = function(haveNPC, armed)
         end
         local reach = maxMeleeDistance(commit)
         local d = distToId(commit)
-        local los = hasLoS(commit)
-        -- VF: Stick band or already in reach+LoS -- combat owns. Else travelIgnore (attack off).
+        local maxEng = runtime.maxEngageDistance()
+        local pickLos = runtime.pickLosOk(commit, d)
+        -- VF: max engage + pick LoS. stick_handoff 120 is not a combat close band.
         -- VF: look-at / OOC -- do not /stick or /nav a quiet hostile.
         local swinging, inCs, onMe = false, false, false
         pcall(function() swinging = not not mq.TLO.Me.Combat() end)
         if runtime.engineInCombat then inCs = not not runtime.engineInCombat() end
         if runtime.spawnIsOnMe then onMe = not not runtime.spawnIsOnMe(commit) end
-        if runtime.canStickClose(commit) or (d <= reach and los) then
+        if d <= maxEng and pickLos then
             if not (swinging or inCs or onMe) then
                 return haveNPC, false
             end
@@ -6337,6 +6430,16 @@ runtime.manualProxFight = function(haveNPC, armed)
             end
             -- VF: combatTick AssistOn owns close. Do not /nav a fight spawn.
             return true, true
+        end
+        if d <= maxEng then
+            -- VF: in band, no LoS: refuse. Do not nav around the wall.
+            stopMoving()
+            local tr = runtime.travel
+            if tr and tr.trip then
+                local t = tr.trip()
+                if t and t.spawnId == commit then tr.clear() end
+            end
+            return true, false
         end
         local tr = runtime.travel
         if tr and tr.beginIgnoreSpawn then
@@ -6386,8 +6489,9 @@ runtime.manualProxFight = function(haveNPC, armed)
             if (tonumber(runtime.manualCommitId) or 0) <= 0 then
                 runtime.manualCommitId = id
             end
-            -- VF: Recurse into stick-or-travel via commit path next tick; close if already near.
-            if runtime.canStickClose(id) or (distToId(id) <= maxMeleeDistance(id) and hasLoS(id)) then
+            -- VF: Recurse into stick-or-travel via commit path next tick; close if already in-band + LoS.
+            local d = distToId(id)
+            if d <= runtime.maxEngageDistance() and runtime.pickLosOk(id, d) then
                 engage = true
             end
         else
@@ -6743,8 +6847,9 @@ local function combatTick()
             -- VF: Rush travel: do not gem-cast -- idle buffs retarget and stand on the pin.
             return
         end
-        -- VF: pin fight: do not drop because ToT is empty. Do not vacuum after haters die.
+        -- VF: pin fight: haters first. Do not vacuum a fresh spawn while hate remains.
         local near = runtime.rushNear or 80
+        local chase = (runtime.rushHateBand and runtime.rushHateBand()) or near
         local haters = runtime.rushHate and runtime.rushHate() or 0
         local pack = 0
         if runtime.countPackMobs then
@@ -6758,18 +6863,23 @@ local function combatTick()
             if tid <= 0 or isIgnored(mq.TLO.Target.CleanName()) then
                 haveNPC = false
                 mq.cmd('/target clear')
-            elseif distToId(tid) > (near + 15)
+            elseif distToId(tid) > chase
                 and not (runtime.spawnIsOnMe and runtime.spawnIsOnMe(tid)) then
                 haveNPC = false
                 mq.cmd('/target clear')
             end
         end
         if not haveNPC then
-            -- VF: chain first (corpse → next wantsFight). Pin start only if nothing is fighting yet.
+            -- VF: chain first (corpse → next hater). Pin trash only if hate is already empty.
             if runtime.chainSwing and runtime.chainSwing() then
                 haveNPC = true
             else
-                local id = runtime.closestThreat and runtime.closestThreat(near)
+                local chase = (runtime.rushHateBand and runtime.rushHateBand()) or near
+                local id = (runtime.closestHater and runtime.closestHater(chase))
+                    or (runtime.closestMobOnMe and runtime.closestMobOnMe(chase))
+                if not id then
+                    id = runtime.closestThreat and runtime.closestThreat(near)
+                end
                 local inCs = runtime.engineInCombat and runtime.engineInCombat()
                 if not id and not inCs and (pack > 0 or grace or haters > 0) then
                     id = runtime.closestHostileNear and runtime.closestHostileNear(near)
@@ -6851,7 +6961,7 @@ local function combatTick()
     local style = ctrl and ctrl.combat_style or 'Melee'
     local tid = mq.TLO.Target.ID() or 0
     -- VF: Roam only -- see desiredRange.
-    local isPullStandBack = (ctrl.mode == 'Roam' and ctrl.pull_stand_back)
+    local isPullStandBack = (ctrl.mode == 'Roam' and ctrl.pull_stand_back and ctrl.pull_style ~= 'Facepull')
     -- VF: maySwing is ensureAttack. Melee close is AssistOn, not moveToward.
     if style == 'Melee' then
         if not isPullStandBack then
@@ -7361,6 +7471,7 @@ require('vft.profile').install(runtime, { cfg = cfg })
 require('vft.melee').install(runtime, {
     cfg = cfg,
     ctrl = function() return ctrl end,
+    loadout = function() return loadout end,
 })
 require('vft.castkind').install(runtime)
 require('vft.disc').install(runtime, {
@@ -7438,6 +7549,7 @@ require('vft.buff').install(runtime, {
     pctHP = pctHP,
     hasSelfHealLoadout = hasSelfHealLoadout,
     isIdleSelfBuff = isIdleSelfBuff,
+    isGemMatching = isGemMatching,
     rowBlocked = rowBlocked,
     conditionMet = conditionMet,
     fireAA = fireAA,
@@ -7479,7 +7591,8 @@ runtime.rushPrepNeeded = function()
     end
     for i = 1, D.NUM_GEMS do
         local g = loadout.gems[i]
-        if g and g.spell and g.spell ~= '' and g.when == 'missing buff' and g.cls ~= 'Brd' then
+        if g and g.spell and g.spell ~= '' and g.enabled ~= false and isGemMatching(i, g.spell)
+            and g.when == 'missing buff' and g.cls ~= 'Brd' then
             local tok = U.baseTok(g.target)
             if (tok == 'Myself' or tok == 'Self') then
                 local pctVal = tonumber(g.pct) or 100

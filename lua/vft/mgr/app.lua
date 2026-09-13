@@ -7,6 +7,7 @@ local IO = require('vft.mgr.io')
 local UI = require('vft.mgr.ui')
 local invLocks = require('vft.inv.locks')
 local toonini = require('vft.toonini')
+local MeleeCat = require('vft.mgr.melee_catalog')
 
 local function newState(hosted)
     return {
@@ -52,6 +53,7 @@ local function newState(hosted)
         safeZoneDraft = '',
         aaNeedScan = false,
         aaScanPct = 0,
+        meleeAbilities = {},
     }
 end
 
@@ -297,6 +299,8 @@ local function create(opts)
         state.groupDraft = ''
         state.prefs = S.copyPrefs(liveCtrl)
         state.aaQueue = S.copyAaQueue(state.charEntry and state.charEntry.aa_queue)
+        -- VF: ini is the live plugin projection. Save snapshots it into loadout.melee_abilities.
+        state.meleeAbilities = MeleeCat.readIniPrefs()
         state.safeZones = IO.loadSafeZones()
         state.safeZoneDraft = ''
         local z = ''
@@ -1443,7 +1447,7 @@ local function create(opts)
         end
         entry.filters = S.copyFilters(state.filters)
         entry.t3_filters = nil
-        entry.melee_abilities = nil
+        entry.melee_abilities = MeleeCat.copyAbilities(state.meleeAbilities)
         entry = S.migrateEntry(entry)
         entry.waypoints = S.copyRoutes(state.routes)
         local control = {}
@@ -1470,6 +1474,15 @@ local function create(opts)
             end
         end
         return true
+    end
+
+    -- VF: /melee Write() is chat-only. Patch the char ini so VF meleeSync keeps the toggle.
+    local function meleeSet(key, on)
+        if not key or key == '' then return end
+        state.meleeAbilities = state.meleeAbilities or {}
+        state.meleeAbilities[key] = on and 1 or 0
+        pcall(function() mq.cmdf('/melee %s=%s', key, on and '1' or '0') end)
+        MeleeCat.patchIniAbility(key, on)
     end
 
     local function doSave()
@@ -1614,7 +1627,7 @@ local function create(opts)
     function app.draw()
         UI.draw(state, {
             save = doSave,
-            meleeSet = opts.meleeSet,
+            meleeSet = meleeSet,
             flushSafeZones = flushSafeZones,
         })
     end

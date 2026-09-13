@@ -226,7 +226,18 @@ function M.install(runtime, api)
         end
     end
 
-    -- VF: CombatState left COMBAT — always enter OOC before PROGRAM (Puller/Rush).
+    -- VF: true when HP / mana / buffs actually need a hold. Empty pass is not a pause.
+    local function oocNeedsHold()
+        if oocNeedHeal() or oocNeedBuff() or oocManaLow() then return true end
+        if runtime.postCombatHealActive or runtime.postCombatBuffActive then return true end
+        if runtime.oocManaSit then return true end
+        if api.isCasting and api.isCasting() then return true end
+        if runtime.castBusy and runtime.castBusy() then return true end
+        if runtime.castingMustStand and runtime.castingMustStand() then return true end
+        return false
+    end
+
+    -- VF: CombatState left COMBAT. Hold PROGRAM only if recovery is actually owed.
     function runtime.oocOnLeaveCombat()
         -- VF: Burn is session-only; never carry into the next pull.
         local c = getCtrl()
@@ -238,7 +249,9 @@ function M.install(runtime, api)
         if runtime.meleeStickSuppressed then
             runtime.meleeStickSuppressed = false
         end
-        runtime.oocEnter('CombatState left COMBAT')
+        if oocNeedsHold() then
+            runtime.oocEnter('CombatState left COMBAT')
+        end
     end
 
     -- VF: /lua run vf while already idle — same OOC pass as end-of-fight.
@@ -410,6 +423,11 @@ function M.install(runtime, api)
         if mq.TLO.Me.Dead() then return oocMarkClear() end
         -- VF: Rush in transit owns move; OOC only between fights / startup.
         if runtime.rushOnTheMove and runtime.rushOnTheMove() then return false end
+
+        -- VF: HP/mana/buffs already good — do not sit on a 1s OOC poll.
+        if (runtime.oocBusy or runtime.oocForcePass) and not oocNeedsHold() then
+            return oocMarkClear()
+        end
 
         -- VF: leave-combat / zone / startup hold PROGRAM; idle missing buffs just click, no hold.
         if not runtime.oocBusy and not oocServicing() then

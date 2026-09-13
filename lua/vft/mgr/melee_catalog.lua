@@ -61,7 +61,9 @@ M.ABILITIES = {
     { key = 'callchallenge', label = 'Call of Challenge', help = 'AA [ON/OFF]?', have = function() return aaOn('call of challenge') end },
 }
 
--- VF: ooc/utility — Standing gate; combat skills — Me.Combat. Never leave if= empty when on.
+-- VF: ooc/utility — standing and not CombatState COMBAT. A Standing-only gate is true
+-- VF: in a fight, and MQ2Melee AttackOFFs to beg/hide/sneak (MQ2Melee.cpp 4816-4860).
+-- VF: combat skills — Me.Combat. Never leave if= empty when on.
 -- VF: Ready() Evaluate() is atoi(ParseMacroData) — bare ${Me.Combat} expands TRUE/FALSE → atoi 0
 -- VF: always aborts (0x15). Must be ${If[...,1,0]}. MQ2Melee.cpp:2147,2628.
 local OOC_GATE = {
@@ -91,7 +93,9 @@ end
 -- VF: if= stays the on-gate even when toggle is 0 — /melee key=0|1 is enough to flip;
 -- VF: empty if= is no gate, so never write blank (MELEE_OFFLOAD).
 function M.gateExpr(key)
-    if OOC_GATE[key] then return '${If[${Me.Standing},1,0]}' end
+    if OOC_GATE[key] then
+        return '${If[${Me.CombatState.Equal[COMBAT]},0,${If[${Me.Standing},1,0]}]}'
+    end
     return '${If[${Me.Combat},1,0]}'
 end
 
@@ -150,6 +154,114 @@ function M.copyAbilities(src)
         end
     end
     return out
+end
+
+-- VF: same stem as vf.lua meleePath — {server}_{char}.ini. /melee Write() is chat only.
+function M.fileKey(s)
+    s = tostring(s or ''):gsub('[^%w]+', '_'):gsub('^_+', ''):gsub('_+$', '')
+    if s == '' then return 'unknown' end
+    return s
+end
+
+function M.iniPath()
+    local cfg = mq.configDir or '.'
+    local server, who = 'local', 'unknown'
+    pcall(function()
+        local s = tostring(mq.TLO.EverQuest.Server() or '')
+        if s == '' or s == 'NULL' then
+            s = tostring(mq.TLO.MacroQuest.Server() or '')
+        end
+        if s ~= '' and s ~= 'NULL' then
+            server = M.fileKey(s)
+            if server == 'unknown' then server = 'local' end
+        end
+        local n = tostring(mq.TLO.Me.Name() or '')
+        if n ~= '' and n ~= 'NULL' then who = M.fileKey(n) end
+    end)
+    return cfg .. '/' .. server .. '_' .. who .. '.ini'
+end
+
+function M.readIniPrefs(path)
+    local prefs = {}
+    for _, row in ipairs(M.ABILITIES) do prefs[row.key] = 0 end
+    path = path or M.iniPath()
+    local f = io.open(path, 'r')
+    if not f then return prefs end
+    local sec = ''
+    for line in f:lines() do
+        local hdr = line:match('^%s*%[(.-)%]%s*$')
+        if hdr then
+            sec = hdr
+        elseif sec == 'MQ2Melee' then
+            local k, v = line:match('^%s*([^=;%s]+)%s*=%s*(.-)%s*$')
+            if k and prefs[k] ~= nil then
+                local n = tonumber(v)
+                prefs[k] = (v == '1' or v == 'on' or (n and n > 0)) and 1 or 0
+            end
+        end
+    end
+    f:close()
+    return prefs
+end
+
+-- VF: plugin /melee key= does not persist. Patch [MQ2Melee] so VF meleeSync keeps the toggle.
+function M.patchIniAbility(key, on, path)
+    if not key or key == '' then return false end
+    local known = false
+    for _, row in ipairs(M.ABILITIES) do
+        if row.key == key then known = true; break end
+    end
+    if not known then return false end
+    local val = (on == true or on == 1 or on == '1' or on == 'on') and '1' or '0'
+    path = path or M.iniPath()
+    local lines, seen, hasSection = {}, {}, false
+    local f = io.open(path, 'r')
+    if f then
+        local sec = ''
+        for line in f:lines() do
+            local hdr = line:match('^%s*%[(.-)%]%s*$')
+            if hdr then
+                sec = hdr
+                if sec == 'MQ2Melee' then hasSection = true end
+            end
+            if sec == 'MQ2Melee' and not hdr then
+                local k = line:match('^%s*([^=;%s]+)%s*=')
+                if k == key then
+                    if not seen[key] then
+                        seen[key] = true
+                        lines[#lines + 1] = key .. '=' .. val
+                    end
+                else
+                    lines[#lines + 1] = line
+                end
+            else
+                lines[#lines + 1] = line
+            end
+        end
+        f:close()
+    end
+    if not seen[key] then
+        if hasSection then
+            local at = nil
+            for i, line in ipairs(lines) do
+                if line:match('^%s*%[MQ2Melee%]%s*$') then at = i; break end
+            end
+            if at then
+                table.insert(lines, at + 1, key .. '=' .. val)
+            else
+                lines[#lines + 1] = '[MQ2Melee]'
+                lines[#lines + 1] = key .. '=' .. val
+            end
+        else
+            lines[#lines + 1] = '[MQ2Melee]'
+            lines[#lines + 1] = key .. '=' .. val
+        end
+    end
+    local w = io.open(path, 'w')
+    if not w then return false end
+    w:write(table.concat(lines, '\n') .. '\n')
+    w:close()
+    return true
 end
 
 function M.readLive(key)

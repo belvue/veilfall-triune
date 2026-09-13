@@ -50,7 +50,7 @@ local function buildRails(chase, abilityPrefs, enrageHold)
 end
 
 -- VF: bump when the rail set or if= gate shape changes -- seeds the written signature.
-local RAILS_VER = 'cmd-v4'
+local RAILS_VER = 'ooc-v5'
 
 -- VF: floor between /melee reload commands. ta_melee.log recorded 646 of them, because
 -- VF: the signature is recomputed from readIniAbilityPrefs() -- the ini we just wrote --
@@ -145,33 +145,27 @@ function M.install(runtime, deps)
         return cfg .. '/' .. server .. '_' .. who .. '.ini'
     end
 
-    -- VF: abilities persist in the MQ2Melee ini. Never rebuild them from meleemvi on sync —
-    -- VF: live can read 0 before Configure finishes and would stomp kick=1 back to off.
+    -- VF: abilities persist in the MQ2Melee ini. Loadout.melee_abilities overlays on applyEntry.
+    -- VF: never rebuild them from meleemvi on sync — live can read 0 before Configure finishes.
     local function readIniAbilityPrefs()
-        local prefs = {}
-        for _, row in ipairs(MeleeCat.ABILITIES) do prefs[row.key] = 0 end
-        local path = runtime.meleePath()
-        local f = io.open(path, 'r')
-        if not f then return prefs end
-        local sec = ''
-        for line in f:lines() do
-            local hdr = line:match('^%s*%[(.-)%]%s*$')
-            if hdr then
-                sec = hdr
-            elseif sec == SEC then
-                local k, v = line:match('^%s*([^=;%s]+)%s*=%s*(.-)%s*$')
-                if k and prefs[k] ~= nil then
-                    local n = tonumber(v)
-                    prefs[k] = (v == '1' or v == 'on' or (n and n > 0)) and 1 or 0
-                end
-            end
-        end
-        f:close()
-        return prefs
+        return MeleeCat.readIniPrefs(runtime.meleePath())
     end
 
     local function abilityPrefs(patch)
         local prefs = readIniAbilityPrefs()
+        if runtime.meleeApplyLoadout then
+            runtime.meleeApplyLoadout = nil
+            local lo = nil
+            pcall(function()
+                local L = deps.loadout and deps.loadout()
+                lo = L and L.melee_abilities
+            end)
+            if type(lo) == 'table' then
+                for k, v in pairs(MeleeCat.copyAbilities(lo)) do
+                    prefs[k] = v
+                end
+            end
+        end
         if type(patch) == 'table' then
             for k, v in pairs(patch) do
                 if prefs[k] ~= nil then
