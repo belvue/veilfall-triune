@@ -471,7 +471,6 @@ local function rowFromAbility(name, existing, via, typHint)
         type = typ,
         combat = combatFromEntry(existing, typ),
         burn = existing and existing.burn_only == true,
-        boost = existing and existing.boost_only == true,
         above = aboveFromEntry(existing),
         below = belowFromEntry(existing, typ, via == 'disc' and 'disc' or 'aa'),
         mobs = mobs,
@@ -806,8 +805,8 @@ local function buildAbilityEntry(row)
     built.combat = COMBAT_SET[row.combat] and row.combat or defaultCombat(row.type)
     built.interrupt = nil
     built.burn_only = row.burn == true
-    -- VF: Boost stub on disc sheet â€” stored only; engine ignore until wired.
-    built.boost_only = row.boost == true
+    -- VF: Boost stub is gone; strip boost_only on the next Manager save.
+    built.boost_only = nil
     local thresh = thresholdFor(row)
     built.ui_pct = thresh
     built.t3_combat = nil
@@ -1527,7 +1526,6 @@ local function defaultControl()
         -- VF: key existed -- heal bands preempt offense. Only set 'DPS first' to opt out.
         heal_priority = 'Support first',
         burn = false,
-        boost = false,
         compact = true,
         group_auto_accept = true,
         group_stay = true,

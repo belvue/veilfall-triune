@@ -1,5 +1,5 @@
 ---@diagnostic disable: undefined-global, undefined-field
--- VF: Inventory UI — entry is /lua run vft/inv (module alone is not a runner).
+-- VF: Inventory UI — entry is /lua run vfi (module alone is not a runner).
 
 local mq = require('mq')
 local ImGui = require('ImGui')
@@ -7,8 +7,17 @@ local brand = require('vft.brand')
 local chat = require('vft.chat')
 local invLocks = require('vft.inv.locks')
 local powerSrc = require('vft.powersource')
+local augs = require('vft.inv.augs')
 
-local NUM_PACKS = 12
+-- VF: Me.NumBagSlots; this emu is 10. Hardcoding 12 hit Invalid item slot pack11.
+local function packCount()
+    local n = 10
+    pcall(function()
+        local v = tonumber(mq.TLO.Me.NumBagSlots())
+        if v and v > 0 then n = v end
+    end)
+    return n
+end
 local SCAN_SEC = 0.25
 local ICON_SIZE = 20
 local ICON_OFFSET = 500
@@ -352,6 +361,47 @@ local function bankOpen()
     return open
 end
 
+-- VF: NMS Bank button is CBankWnd::Activate; no pocket, no #vault_bank.
+local BANK_ACTIVATE, PINST_BANKWND, PINST_ME, EQ_BASE = 0x6273E0, 0xD1FC90, 0xDD2630, 0x400000
+
+local function activateBankWnd()
+    local did = false
+    pcall(function()
+        local ffi = require('ffi')
+        pcall(function() ffi.cdef('void* GetModuleHandleA(const char*);') end)
+        local k = ffi.load('kernel32')
+        local b = ffi.cast('char*', k.GetModuleHandleA('eqgame.exe'))
+        local function A(x) return b + x - EQ_BASE end
+        local w = ffi.cast('void**', A(PINST_BANKWND))[0]
+        local p = ffi.cast('void**', A(PINST_ME))[0]
+        if w ~= ffi.NULL and p ~= ffi.NULL then
+            ffi.cast('void(__thiscall*)(void*,void*)', A(BANK_ACTIVATE))(w, p)
+            did = true
+        end
+    end)
+    return did
+end
+
+local function closeBankWnd()
+    pcall(function()
+        if mq.TLO.Window('BigBankWnd').Open() then
+            mq.cmd('/notify BigBankWnd DoneButton leftmouseup')
+        end
+        if mq.TLO.Window('BankWnd').Open() then
+            mq.cmd('/notify BankWnd DoneButton leftmouseup')
+        end
+    end)
+end
+
+local function jobNeedsBank(job)
+    if not job then return false end
+    if job.op == 'massmove' or job.op == 'pickbank' then return true end
+    if job.op == 'xlcombine' then return true end
+    if job.op == 'putcursor' and job.dest == 'bank' then return true end
+    if job.op == 'movetobank' or job.op == 'movetobags' then return true end
+    return false
+end
+
 local function rightClicked()
     local right = (ImGuiMouseButton and ImGuiMouseButton.Right) or 1
     if ImGui.IsItemClicked and ImGui.IsItemClicked(right) then return true end
@@ -361,54 +411,63 @@ end
 local function create(opts)
     opts = opts or {}
     local hosted = not not opts.hosted
-    local openGUI = not hosted
+    -- VF: MQ Lua 60 upvalues on draw; mutable state lives on S.
+    local S = {}
+    S.openGUI = not hosted
     powerSrc.installEvents('VftInvPs')
     powerSrc.refresh()
-    local filter = ''
-    local showEmpty = false
-    local showHelp = false
-    local hideTooltips = false
-    local turninConfirm = nil -- { names=..., target=... } while confirm popup is up
-    -- VF: Bags | Bank
-    local view = 'bags'
-    local checked = {} -- checked[where][name] = true
+    S.filter = ''
+    S.showEmpty = false
+    S.showHelp = false
+    S.hideTooltips = false
+    S.turninConfirm = nil -- { names=..., target=... } while confirm popup is up
+    -- VF: Bags | Bank | Augs | Settings
+    S.view = 'bags'
+    S.augFamily = 'kera'
+    S.augFlavor = nil
+    S.includeWorn = true
+    S.xlMath = true
+    S.checked = {} -- checked[where][name] = true
     -- local bagTrace = false -- VF: re-enable Trace checkbox below when debugging sell/moves
-    local locked = {} -- item id -> name; [Locked] in {server}_{char}_loadout.ini
-    local lockPath = ''
-    local locksDirty = false
-    local lockSaveWarned = false
-    local lastScan = 0
-    local rows = {}
-    local used, free, packs = 0, 0, 0
-    local pending = nil
-    local status = ''
-    local bankWatchUntil = 0
-    local massDestroyQ = {}
-    local memQ = {}
-    local memWaitUntil = 0
-    local memExpect = nil
-    local memDone, memSkip, memFail = 0, 0, 0
-    local openedPacks = {}
+    S.locked = {} -- item id -> name; [Locked] in {server}_{char}_loadout.ini
+    S.lockPath = ''
+    S.locksDirty = false
+    S.lockSaveWarned = false
+    S.lastScan = 0
+    S.rows = {}
+    S.used, S.free, S.packs = 0, 0, 0
+    S.pending = nil
+    S.jobQ = {}
+    S.bankLease = nil
+    S.status = ''
+    S.bankWatchUntil = 0
+    S.bankActivateAt = 0
+    S.massDestroyQ = {}
+    S.memQ = {}
+    S.memWaitUntil = 0
+    S.memExpect = nil
+    S.memDone, S.memSkip, S.memFail = 0, 0, 0
+    S.openedPacks = {}
     local ensurePackOpen -- VF: defined with scribe helpers; sell opens packs first.
-    local animItems
-    pcall(function() animItems = mq.FindTextureAnimation('A_DragItem') end)
+    S.animItems = nil
+    pcall(function() S.animItems = mq.FindTextureAnimation('A_DragItem') end)
 
     local function setTip(s)
-        if hideTooltips or not s or s == '' then return end
+        if S.hideTooltips or not s or s == '' then return end
         -- VF: MQ SetTooltip runs through format; escape % (e.g. power source 0%).
         ImGui.SetTooltip((tostring(s):gsub('%%', '%%%%')))
     end
 
     local function drawIcon(icon)
-        if not animItems or not icon or icon <= 0 then
+        if not S.animItems or not icon or icon <= 0 then
             ImGui.Dummy(ICON_SIZE, ICON_SIZE)
             return
         end
         local cell = icon - ICON_OFFSET
         if cell < 0 then cell = icon end
         local ok = pcall(function()
-            animItems:SetTextureCell(cell)
-            ImGui.DrawTextureAnimation(animItems, ICON_SIZE, ICON_SIZE)
+            S.animItems:SetTextureCell(cell)
+            ImGui.DrawTextureAnimation(S.animItems, ICON_SIZE, ICON_SIZE)
         end)
         if not ok then ImGui.Dummy(ICON_SIZE, ICON_SIZE) end
     end
@@ -418,7 +477,7 @@ local function create(opts)
     end
 
     local function scanBags(nextRows, counts)
-        for pack = 1, NUM_PACKS do
+        for pack = 1, packCount() do
             local bag
             pcall(function() bag = mq.TLO.Me.Inventory('pack' .. pack) end)
             if bag and bag() then
@@ -469,7 +528,7 @@ local function create(opts)
                             })
                         else
                             counts.free = counts.free + 1
-                            if showEmpty then
+                            if S.showEmpty then
                                 pushRow(nextRows, {
                                     name = '',
                                     qty = 0,
@@ -487,7 +546,52 @@ local function create(opts)
                             end
                         end
                     end
+                else
+                    -- VF: Loose item in a pack slot (not a bag). Autoinv often lands here.
+                    local name, qty, id, icon, value, nodrop, norent, kind, teachName
+                    pcall(function()
+                        name = trim(bag.Name())
+                        qty = tonumber(bag.Stack()) or 1
+                        id = tonumber(bag.ID()) or 0
+                        icon = tonumber(bag.Icon()) or 0
+                        value = tonumber(bag.Value()) or 0
+                        nodrop = not not bag.NoDrop()
+                        norent = not not bag.NoRent()
+                        kind, teachName = scrollInfo(bag)
+                    end)
+                    if name and name ~= '' and name ~= 'NULL' then
+                        counts.used = counts.used + 1
+                        local stackable = false
+                        pcall(function()
+                            if bag.Stackable then stackable = not not bag.Stackable() end
+                        end)
+                        local copper = value or 0
+                        pushRow(nextRows, {
+                            name = name,
+                            qty = qty or 1,
+                            pack = pack,
+                            slot = 0,
+                            bank = 0,
+                            id = id or 0,
+                            icon = icon or 0,
+                            copper = copper,
+                            value = nodrop and 0 or copper,
+                            price = nodrop and 'NO DROP' or fmtCoins(copper),
+                            nodrop = nodrop,
+                            norent = norent,
+                            stackable = stackable,
+                            spell = kind ~= nil,
+                            kind = kind,
+                            spellName = teachName or '',
+                            where = 'bags',
+                            loc = 'pack' .. pack,
+                        })
+                    else
+                        counts.free = counts.free + 1
+                    end
                 end
+            else
+                counts.free = counts.free + 1
             end
         end
     end
@@ -545,7 +649,7 @@ local function create(opts)
                             })
                         else
                             counts.free = counts.free + 1
-                            if showEmpty then
+                            if S.showEmpty then
                                 pushRow(nextRows, {
                                     name = '',
                                     qty = 0,
@@ -662,13 +766,22 @@ local function create(opts)
 
     local function scan(force)
         local now = os.clock()
-        if not force and (now - lastScan) < SCAN_SEC then return end
-        lastScan = now
-        if view ~= 'bags' and view ~= 'bank' then view = 'bags' end
+        if not force and (now - S.lastScan) < SCAN_SEC then return end
+        S.lastScan = now
+        if S.view ~= 'bags' and S.view ~= 'bank' and S.view ~= 'augs' and S.view ~= 'settings' then
+            S.view = 'bags'
+        end
+        if S.view == 'settings' then return end
         local nextRows = {}
         local counts = { used = 0, free = 0, packs = 0 }
-        if view == 'bags' then scanBags(nextRows, counts) end
-        if view == 'bank' then scanBank(nextRows, counts) end
+        if S.view == 'bags' then scanBags(nextRows, counts) end
+        if S.view == 'bank' then scanBank(nextRows, counts) end
+        if S.view == 'augs' then
+            scanBags(nextRows, counts)
+            scanBank(nextRows, counts)
+            -- VF: always list equipped augs in Loc; Settings includeWorn only changes shopping counts.
+            augs.scanWorn(function(r) pushRow(nextRows, r) end)
+        end
         nextRows = consolidateRows(nextRows)
         table.sort(nextRows, function(a, b)
             if (a.empty and not b.empty) then return false end
@@ -676,7 +789,7 @@ local function create(opts)
             if (a.name or '') ~= (b.name or '') then return (a.name or '') < (b.name or '') end
             return (a.loc or '') < (b.loc or '')
         end)
-        rows, used, free, packs = nextRows, counts.used, counts.free, counts.packs
+        S.rows, S.used, S.free, S.packs = nextRows, counts.used, counts.free, counts.packs
     end
 
     local function rowLoc(row, idx)
@@ -685,7 +798,8 @@ local function create(opts)
         return { pack = row.pack, slot = row.slot, bank = row.bank, qty = row.qty }
     end
 
-    local function findFirstLoc(where, name)
+    local function findFirstLoc(where, name, skipPack)
+        skipPack = tonumber(skipPack) or 0
         local tmp, counts = {}, { used = 0, free = 0, packs = 0 }
         if where == 'bags' then
             scanBags(tmp, counts)
@@ -694,7 +808,9 @@ local function create(opts)
         end
         for _, r in ipairs(tmp) do
             if not r.empty and r.name == name then
-                return { pack = r.pack, slot = r.slot, bank = r.bank, qty = tonumber(r.qty) or 1 }
+                if skipPack <= 0 or (tonumber(r.pack) or 0) ~= skipPack then
+                    return { pack = r.pack, slot = r.slot, bank = r.bank, qty = tonumber(r.qty) or 1 }
+                end
             end
         end
         return nil
@@ -702,46 +818,102 @@ local function create(opts)
 
     local function ensureBankOpen()
         if bankOpen() then
-            bankWatchUntil = 0
+            S.bankWatchUntil = 0
+            S.bankActivateAt = 0
             return true
         end
-        mq.cmd('/say #vault_bank')
-        status = 'opening bank...'
-        bankWatchUntil = os.clock() + BANK_WAIT
+        activateBankWnd()
+        if bankOpen() then
+            S.bankWatchUntil = 0
+            S.bankActivateAt = 0
+            return true
+        end
+        S.status = 'opening bank...'
+        S.bankActivateAt = os.clock() + 0.3
+        S.bankWatchUntil = os.clock() + BANK_WAIT
         return false
     end
 
     local function tickBankWatch()
-        if bankWatchUntil <= 0 then return end
+        if S.bankWatchUntil <= 0 then return end
         if bankOpen() then
-            bankWatchUntil = 0
-            lastScan = 0
-            status = ''
+            S.bankWatchUntil = 0
+            S.bankActivateAt = 0
+            S.lastScan = 0
+            S.status = ''
             return
         end
-        if os.clock() >= bankWatchUntil then
-            bankWatchUntil = 0
-            status = 'Bank window not open'
+        if S.bankActivateAt > 0 and os.clock() >= S.bankActivateAt then
+            activateBankWnd()
+            S.bankActivateAt = os.clock() + 0.5
+        end
+        if os.clock() >= S.bankWatchUntil then
+            S.bankWatchUntil = 0
+            S.bankActivateAt = 0
+            S.status = 'Bank window not open'
+        end
+    end
+
+    local function beginBankLease()
+        S.bankLease = S.bankLease or { owned = true }
+    end
+
+    -- VF: Close after our bank jobs. Do not keep it open for the Bank/Augs tabs.
+    local function endBankLease()
+        if S.pending or (S.jobQ and #S.jobQ > 0) then return end
+        if S.destroyArmed or (S.massDestroyQ and #S.massDestroyQ > 0) then return end
+        if S.bankLease then
+            closeBankWnd()
+            S.bankWatchUntil = 0
+            S.bankActivateAt = 0
+        end
+        S.bankLease = nil
+    end
+
+    local function enqueueJob(job)
+        if not job then return end
+        if jobNeedsBank(job) then beginBankLease() end
+        if S.pending then
+            if S.pending.op == 'massmove' and job.op == 'massmove' and S.pending.toBank == job.toBank then
+                for _, n in ipairs(job.names or {}) do
+                    S.pending.names[#S.pending.names + 1] = n
+                end
+                S.status = string.format('queued %d...', #(S.pending.names or {}))
+                return
+            end
+            S.jobQ[#S.jobQ + 1] = job
+            S.status = string.format('queued (%d)', #S.jobQ)
+            return
+        end
+        S.pending = job
+    end
+
+    local function pumpJobs()
+        if S.pending then return end
+        if S.jobQ and #S.jobQ > 0 then
+            local n = table.remove(S.jobQ, 1)
+            S.pending = n
+            if jobNeedsBank(n) then beginBankLease() end
         end
     end
 
     local function rowWhere(row)
-        return (row and row.where) or view or 'bags'
+        return (row and row.where) or S.view or 'bags'
     end
 
     local function isChecked(where, name)
-        local t = checked[where or '']
+        local t = S.checked[where or '']
         return not not (t and name and t[name])
     end
 
     local function setChecked(where, name, on)
-        where = where or view or 'bags'
+        where = where or S.view or 'bags'
         if not name or name == '' then return end
         if on then
-            if not checked[where] then checked[where] = {} end
-            checked[where][name] = true
-        elseif checked[where] then
-            checked[where][name] = nil
+            if not S.checked[where] then S.checked[where] = {} end
+            S.checked[where][name] = true
+        elseif S.checked[where] then
+            S.checked[where][name] = nil
         end
     end
 
@@ -749,12 +921,12 @@ local function create(opts)
     local function dbg(...) end
 
     local function clearChecks()
-        checked = {}
+        S.checked = {}
     end
 
     local function isLockedId(id)
         id = tonumber(id) or 0
-        return id > 0 and locked[id] ~= nil
+        return id > 0 and S.locked[id] ~= nil
     end
 
     local function isLockedRow(row)
@@ -765,7 +937,7 @@ local function create(opts)
     local function isLockedName(name)
         name = trim(name or '')
         if name == '' then return false end
-        for id, n in pairs(locked) do
+        for id, n in pairs(S.locked) do
             if n == name then return true end
         end
         local id = 0
@@ -778,41 +950,41 @@ local function create(opts)
 
     local function reloadLocks()
         local map, path, migrated = invLocks.load()
-        locked = map or {}
-        lockPath = path or ''
+        S.locked = map or {}
+        S.lockPath = path or ''
         local n = 0
-        for _ in pairs(locked) do n = n + 1 end
-        dbg('locks loaded n=%d path=%s migrated=%s', n, tostring(lockPath), tostring(migrated))
-        if migrated then locksDirty = true end
+        for _ in pairs(S.locked) do n = n + 1 end
+        dbg('locks loaded n=%d path=%s migrated=%s', n, tostring(S.lockPath), tostring(migrated))
+        if migrated then S.locksDirty = true end
     end
 
     local function setLockedRow(row, on)
         if not row or row.empty then return end
         local id = tonumber(row.id) or 0
         if id <= 0 then
-            status = 'no item id to lock'
+            S.status = 'no item id to lock'
             return
         end
         local want = not not on
-        if want and locked[id] then return end
-        if (not want) and not locked[id] then return end
+        if want and S.locked[id] then return end
+        if (not want) and not S.locked[id] then return end
         if want then
-            locked[id] = row.name or ''
+            S.locked[id] = row.name or ''
         else
-            locked[id] = nil
+            S.locked[id] = nil
         end
-        locksDirty = true
+        S.locksDirty = true
         dbg('lock %s id=%s name=%s', want and 'ON' or 'OFF', tostring(id), tostring(row.name))
-        status = (want and 'locked ' or 'unlocked ') .. (row.name or tostring(id))
+        S.status = (want and 'locked ' or 'unlocked ') .. (row.name or tostring(id))
     end
 
     local function flushLocks()
-        if not locksDirty then return end
-        locksDirty = false
-        local ok, path = invLocks.save(locked)
-        lockPath = path or lockPath
-        if not ok and not lockSaveWarned then
-            lockSaveWarned = true
+        if not S.locksDirty then return end
+        S.locksDirty = false
+        local ok, path = invLocks.save(S.locked)
+        S.lockPath = path or S.lockPath
+        if not ok and not S.lockSaveWarned then
+            S.lockSaveWarned = true
             -- VF: one chat line; UI status still shows detail if needed.
             chat.err('Inv', 'could not write locks -- create vft/config/ (' .. tostring(path) .. ')')
         elseif ok then
@@ -823,8 +995,21 @@ local function create(opts)
     reloadLocks()
 
     local function checkedNames(where, allowLocked)
+        if where == 'augs' then
+            local seen, names = {}, {}
+            for _, w in ipairs({ 'bags', 'bank' }) do
+                for _, n in ipairs(checkedNames(w, allowLocked)) do
+                    if not seen[n] then
+                        seen[n] = true
+                        names[#names + 1] = n
+                    end
+                end
+            end
+            table.sort(names)
+            return names
+        end
         local names = {}
-        local t = checked[where]
+        local t = S.checked[where]
         if t then
             for name, on in pairs(t) do
                 -- VF: Lock blocks Sell/Delete only; Move may include locked names.
@@ -849,10 +1034,10 @@ local function create(opts)
 
     local function pruneChecksForSell(where)
         where = where or 'bags'
-        lastScan = 0
+        S.lastScan = 0
         scan()
         local keep, skipped = {}, 0
-        local t = checked[where]
+        local t = S.checked[where]
         if not t then return keep, 0 end
         local names = {}
         for name, on in pairs(t) do
@@ -860,7 +1045,7 @@ local function create(opts)
         end
         for _, name in ipairs(names) do
             local row
-            for _, r in ipairs(rows) do
+            for _, r in ipairs(S.rows) do
                 if not r.empty and (r.where or where) == where and r.name == name then
                     row = r
                     break
@@ -879,8 +1064,11 @@ local function create(opts)
 
     local function countChecked(where)
         local n = 0
+        if where == 'augs' then
+            return countChecked('bags') + countChecked('bank')
+        end
         if where then
-            local t = checked[where]
+            local t = S.checked[where]
             if t then
                 for _, on in pairs(t) do
                     if on then n = n + 1 end
@@ -888,7 +1076,7 @@ local function create(opts)
             end
             return n
         end
-        for _, t in pairs(checked) do
+        for _, t in pairs(S.checked) do
             for _, on in pairs(t) do
                 if on then n = n + 1 end
             end
@@ -897,93 +1085,113 @@ local function create(opts)
     end
 
     local function matches(row)
-        local q = filter:lower()
+        if S.view == 'augs' then
+            if row.empty then return false end
+            if not augs.listMatch(row.name, S.augFamily, S.augFlavor) then return false end
+        end
+        local q = S.filter:lower()
         if q == '' then return true end
         if row.empty then return false end
         local hay = ((row.name or '') .. ' ' .. (row.loc or '')):lower()
         return hay:find(q, 1, true)
     end
 
+    -- VF: slot 0 is a loose top-level pack item; `in pack N 0` is invalid.
+    local function notifyPackClick(pack, slot, key)
+        pack = tonumber(pack) or 0
+        slot = tonumber(slot) or 0
+        if pack <= 0 then return end
+        if slot > 0 then
+            mq.cmdf('%s /itemnotify in pack%d %d leftmouseup', key, pack, slot)
+        else
+            mq.cmdf('%s /itemnotify pack%d leftmouseup', key, pack)
+        end
+    end
+
     local function pickup(row, one)
         if not row or row.empty then return end
-        if (mq.TLO.Cursor.ID() or 0) > 0 then
-            mq.cmd('/autoinventory')
-            mq.delay(50)
-        end
         local loc = rowLoc(row, 1)
         local w = row.where or 'bags'
+        if w == 'worn' then
+            S.status = 'worn augs stay in gear'
+            return
+        end
         if w == 'bags' then
+            if (mq.TLO.Cursor.ID() or 0) > 0 then
+                mq.cmd('/autoinventory')
+                mq.delay(50)
+            end
             -- VF: Ctrl+LMB takes one off a stack (same as /ctrlkey itemnotify).
             if one then
-                mq.cmdf('/nomodkey /ctrlkey /itemnotify in pack%d %d leftmouseup', loc.pack, loc.slot)
-                status = 'picked 1 ' .. (row.name or '')
+                notifyPackClick(loc.pack, loc.slot, '/nomodkey /ctrlkey')
+                S.status = 'picked 1 ' .. (row.name or '')
             else
-                mq.cmdf('/nomodkey /itemnotify in pack%d %d leftmouseup', loc.pack, loc.slot)
-                status = 'picked ' .. (row.name or '')
+                notifyPackClick(loc.pack, loc.slot, '/nomodkey')
+                S.status = 'picked ' .. (row.name or '')
             end
-            lastScan = 0
+            S.lastScan = 0
         elseif w == 'bank' then
-            if one then
-                if not bankOpen() then
-                    status = 'Open bank first'
-                    return
-                end
-                local bank = tonumber(loc.bank) or 0
-                local slot = tonumber(loc.slot) or 0
-                if bank <= 0 then return end
-                if slot > 0 then
-                    mq.cmdf('/nomodkey /ctrlkey /itemnotify in bank%d %d leftmouseup', bank, slot)
-                else
-                    mq.cmdf('/nomodkey /ctrlkey /itemnotify bank%d leftmouseup', bank)
-                end
-                status = 'picked 1 ' .. (row.name or '')
-                lastScan = 0
-                return
-            end
-            pending = { op = 'pickbank', row = row, phase = 'prep', t = os.clock() }
-            status = 'picking from bank...'
+            enqueueJob({ op = 'pickbank', row = row, one = not not one })
+            S.status = 'queued pick'
             return
         end
     end
 
-    local function dropToBags()
+    local function dropToBags(skipPack)
+        skipPack = tonumber(skipPack) or 0
         if (mq.TLO.Cursor.ID() or 0) <= 0 then
-            status = 'cursor empty'
-            return
+            S.status = 'cursor empty'
+            return false
         end
-        for pack = 1, NUM_PACKS do
-            local bag
-            pcall(function() bag = mq.TLO.Me.Inventory('pack' .. pack) end)
-            if bag and bag() then
-                local size = tonumber(bag.Container()) or 0
-                for slot = 1, size do
-                    local empty = true
-                    pcall(function()
-                        local it = bag.Item(slot)
-                        if it and it() then empty = false end
-                    end)
-                    if empty then
-                        mq.cmdf('/nomodkey /itemnotify in pack%d %d leftmouseup', pack, slot)
-                        status = string.format('dropped to pack%d:%d', pack, slot)
-                        lastScan = 0
-                        return
+        for pack = 1, packCount() do
+            if pack ~= skipPack then
+                local bag
+                pcall(function() bag = mq.TLO.Me.Inventory('pack' .. pack) end)
+                if bag and bag() then
+                    local size = tonumber(bag.Container()) or 0
+                    for slot = 1, size do
+                        local empty = true
+                        pcall(function()
+                            local it = bag.Item(slot)
+                            if it and it() then empty = false end
+                        end)
+                        if empty then
+                            mq.cmdf('/nomodkey /itemnotify in pack%d %d leftmouseup', pack, slot)
+                            S.status = string.format('dropped to pack%d:%d', pack, slot)
+                            S.lastScan = 0
+                            return true
+                        end
                     end
                 end
             end
         end
+        -- VF: Empty pack slot (no bag/item). Never walk past Me.NumBagSlots (pack11 is invalid here).
+        for pack = 1, packCount() do
+            if pack ~= skipPack then
+                local bag
+                pcall(function() bag = mq.TLO.Me.Inventory('pack' .. pack) end)
+                if not (bag and bag()) then
+                    mq.cmdf('/nomodkey /itemnotify pack%d leftmouseup', pack)
+                    S.status = 'dropped to pack' .. pack
+                    S.lastScan = 0
+                    return true
+                end
+            end
+        end
         mq.cmd('/autoinventory')
-        status = 'bags full -- autoinv'
-        lastScan = 0
+        S.status = 'bags full -- autoinv'
+        S.lastScan = 0
+        return (mq.TLO.Cursor.ID() or 0) <= 0
     end
 
     -- VF: Never itemnotify bank* unless BankWnd is open - closed bank looks empty and dumps to inv.
     local function placeCursorInBank()
         if (mq.TLO.Cursor.ID() or 0) <= 0 then
-            status = 'cursor empty'
+            S.status = 'cursor empty'
             return false
         end
         if not bankOpen() then
-            status = 'bank not open'
+            S.status = 'bank not open'
             return false
         end
         local maxBank = 24
@@ -1005,20 +1213,20 @@ local function create(opts)
                         end)
                         if empty then
                             mq.cmdf('/nomodkey /itemnotify in bank%d %d leftmouseup', b, slot)
-                            status = string.format('dropped to bank%d:%d', b, slot)
-                            lastScan = 0
+                            S.status = string.format('dropped to bank%d:%d', b, slot)
+                            S.lastScan = 0
                             return true
                         end
                     end
                 end
             else
                 mq.cmdf('/nomodkey /itemnotify bank%d leftmouseup', b)
-                status = 'dropped to bank' .. b
-                lastScan = 0
+                S.status = 'dropped to bank' .. b
+                S.lastScan = 0
                 return true
             end
         end
-        status = 'bank full'
+        S.status = 'bank full'
         return false
     end
 
@@ -1093,17 +1301,32 @@ local function create(opts)
 
     local function ensureBankReady()
         if bankOpen() then return true end
-        mq.cmd('/say #vault_bank')
-        status = 'opening bank...'
+        activateBankWnd()
+        if bankOpen() then
+            S.bankWatchUntil = 0
+            S.bankActivateAt = 0
+            S.status = ''
+            return true
+        end
+        S.status = 'opening bank...'
         local deadline = os.clock() + BANK_WAIT
+        local nextAct = os.clock() + 0.3
         while os.clock() < deadline do
             if bankOpen() then
-                status = ''
+                S.bankWatchUntil = 0
+                S.bankActivateAt = 0
+                S.status = ''
                 return true
+            end
+            if os.clock() >= nextAct then
+                activateBankWnd()
+                nextAct = os.clock() + 0.3
             end
             mq.delay(40)
         end
-        status = 'Bank window not open'
+        S.bankWatchUntil = 0
+        S.bankActivateAt = 0
+        S.status = 'Bank window not open'
         return false
     end
 
@@ -1175,7 +1398,7 @@ local function create(opts)
         if not name or name == '' then return 0 end
         local where = toBank and 'bags' or 'bank'
         if not ensureBankReady() then
-            status = 'Bank window not open'
+            S.status = 'Bank window not open'
             return 0
         end
         local moved = 0
@@ -1190,11 +1413,11 @@ local function create(opts)
             local wantQty = tonumber(loc.qty) or 1
             if toBank then
                 -- VF: shift = whole stack off the bag slot.
-                mq.cmdf('/nomodkey /shiftkey /itemnotify in pack%d %d leftmouseup', loc.pack, loc.slot)
+                notifyPackClick(loc.pack, loc.slot, '/nomodkey /shiftkey')
                 mq.delay(80)
                 acceptQtyQuick()
                 if not waitCursor(true, 450) then
-                    status = 'could not pick ' .. name
+                    S.status = 'could not pick ' .. name
                     break
                 end
                 local got = cursorStack()
@@ -1204,7 +1427,7 @@ local function create(opts)
                 units = units + got
             else
                 if not pickFromBankLoc(loc, name) then
-                    status = 'could not pick from bank: ' .. name
+                    S.status = 'could not pick from bank: ' .. name
                     break
                 end
                 local got = cursorStack()
@@ -1217,7 +1440,7 @@ local function create(opts)
                     waitCursor(false, 400)
                 end
                 if (mq.TLO.Cursor.ID() or 0) > 0 then
-                    status = 'bags full?'
+                    S.status = 'bags full?'
                     break
                 end
                 units = units + got
@@ -1227,19 +1450,19 @@ local function create(opts)
                 name, toBank and 'bank' or 'bags', tostring(wantQty), tostring(units))
             mq.delay(40)
         end
-        status = string.format('%s %d slot(s) / %d %s',
+        S.status = string.format('%s %d slot(s) / %d %s',
             toBank and 'banked' or 'bagged', moved, units, name)
-        lastScan = 0
+        S.lastScan = 0
         return moved
     end
 
     local function dropToBank()
         if (mq.TLO.Cursor.ID() or 0) <= 0 then
-            status = 'cursor empty'
+            S.status = 'cursor empty'
             return
         end
         if not ensureBankReady() then
-            status = 'Bank window not open'
+            S.status = 'Bank window not open'
             return
         end
         pcall(placeCursorInBank)
@@ -1269,7 +1492,7 @@ local function create(opts)
                 if item and item() then item.Inspect() end
             end)
         end
-        status = (ok and 'inspect ' or 'could not inspect ') .. (row.name or '')
+        S.status = (ok and 'inspect ' or 'could not inspect ') .. (row.name or '')
     end
 
     local function autoinv()
@@ -1282,9 +1505,9 @@ local function create(opts)
             mq.delay(50)
         end
         if n > 0 then
-            status = 'inventoried' .. (name ~= '' and (' ' .. name) or '')
+            S.status = 'inventoried' .. (name ~= '' and (' ' .. name) or '')
         else
-            status = 'cursor empty'
+            S.status = 'cursor empty'
         end
     end
 
@@ -1423,20 +1646,20 @@ local function create(opts)
     local function sell(row)
         if not row or row.empty then return false end
         if (row.where or 'bags') ~= 'bags' then
-            status = 'Sell is bags only'
+            S.status = 'Sell is bags only'
             return false
         end
         if row.nodrop then
-            status = row.name .. ' is No Drop'
+            S.status = row.name .. ' is No Drop'
             return false
         end
         if isLockedRow(row) then
-            status = row.name .. ' is locked'
+            S.status = row.name .. ' is locked'
             dbg('sell blocked locked %s id=%s', tostring(row.name), tostring(row.id))
             return false
         end
         if not merchantOpen() then
-            status = 'Sell is off until a trader window is open'
+            S.status = 'Sell is off until a trader window is open'
             return false
         end
         local want = row.name or ''
@@ -1450,7 +1673,7 @@ local function create(opts)
             tostring(fiLoc and fiLoc.pack), tostring(fiLoc and fiLoc.slot), tostring(fiLoc and fiLoc.invSlot),
             tostring(row.pack), tostring(row.slot))
         if not loc then
-            status = 'not in bags: ' .. want
+            S.status = 'not in bags: ' .. want
             dbg('sell fail: no loc for %s', want)
             return false
         end
@@ -1459,6 +1682,8 @@ local function create(opts)
         if loc.pack and loc.pack > 0 and loc.slot and loc.slot > 0 then
             ensurePackOpen(loc.pack)
             mq.cmdf('/nomodkey /itemnotify in pack%d %d leftmouseup', loc.pack, loc.slot)
+        elseif loc.pack and loc.pack > 0 then
+            mq.cmdf('/nomodkey /itemnotify pack%d leftmouseup', loc.pack)
         elseif loc.invSlot and loc.invSlot > 0 then
             mq.cmdf('/nomodkey /itemnotify %d leftmouseup', loc.invSlot)
         end
@@ -1474,7 +1699,7 @@ local function create(opts)
         if sellSelectedOrCursor(want) then
             mq.delay(500, function() return not findFirstLoc('bags', want) or selectedLabel() ~= want end)
             if not findFirstLoc('bags', want) or selectedLabel() ~= want or cursorName() ~= want then
-                status = 'sold ' .. want
+                S.status = 'sold ' .. want
                 dbg('sell ok path1 %s', want)
                 return true
             end
@@ -1485,6 +1710,8 @@ local function create(opts)
         if loc.pack and loc.pack > 0 and loc.slot and loc.slot > 0 then
             ensurePackOpen(loc.pack)
             mq.cmdf('/nomodkey /ctrlkey /itemnotify in pack%d %d leftmouseup', loc.pack, loc.slot)
+        elseif loc.pack and loc.pack > 0 then
+            mq.cmdf('/nomodkey /ctrlkey /itemnotify pack%d leftmouseup', loc.pack)
         elseif loc.invSlot and loc.invSlot > 0 then
             mq.cmdf('/nomodkey /ctrlkey /itemnotify %d leftmouseup', loc.invSlot)
         else
@@ -1496,7 +1723,7 @@ local function create(opts)
             clickSellButton()
             mq.delay(500, function() return (mq.TLO.Cursor.ID() or 0) <= 0 end)
             if (mq.TLO.Cursor.ID() or 0) <= 0 or cursorName() ~= want then
-                status = 'sold ' .. want
+                S.status = 'sold ' .. want
                 dbg('sell ok path2 %s', want)
                 return true
             end
@@ -1532,14 +1759,14 @@ local function create(opts)
             mq.delay(400)
             dbg('sell path3 Sell qty=%s', tostring(qty))
             if not findFirstLoc('bags', want) or selectedLabel() ~= want then
-                status = 'sold ' .. want
+                S.status = 'sold ' .. want
                 dbg('sell ok path3 %s', want)
                 return true
             end
         end
 
         clearCursor()
-        status = 'could not sell ' .. want
+        S.status = 'could not sell ' .. want
         dbg('sell fail all paths %s label=%q cursor=%q btn=%s',
             want, selectedLabel(), cursorName(), tostring(sellButtonOk()))
         return false
@@ -1549,7 +1776,7 @@ local function create(opts)
     local function sellAllNamed(name)
         if not name or name == '' then return 0 end
         if not merchantOpen() then
-            status = 'open a vendor to sell'
+            S.status = 'open a vendor to sell'
             return 0
         end
         local sold = 0
@@ -1572,22 +1799,25 @@ local function create(opts)
     end
 
     -- VF: /destroy eats the cursor. Pick this tick, destroy next tick when the name matches.
-    local destroyArmed = nil
-    local massDestroyWhere = 'bags'
+    S.destroyArmed = nil
+    S.massDestroyWhere = 'bags'
 
     local function armDestroy(row)
         if not row or row.empty then return end
         local w = row.where or 'bags'
         if w ~= 'bags' and w ~= 'bank' then
-            status = 'Del only from Bags or Bank'
+            S.status = 'Del only from Bags or Bank'
             return
         end
-        if w == 'bank' and not bankOpen() then
-            status = 'open bank to delete from bank'
-            return
+        if w == 'bank' then
+            beginBankLease()
+            if not ensureBankReady() then
+                S.status = 'Bank window not open'
+                return
+            end
         end
         if isLockedRow(row) then
-            status = row.name .. ' is locked'
+            S.status = row.name .. ' is locked'
             return
         end
         local loc = rowLoc(row, 1)
@@ -1596,72 +1826,72 @@ local function create(opts)
             waitCursor(false, 200)
         end
         if w == 'bags' then
-            mq.cmdf('/nomodkey /shiftkey /itemnotify in pack%d %d leftmouseup', loc.pack, loc.slot)
+            notifyPackClick(loc.pack, loc.slot, '/nomodkey /shiftkey')
             mq.delay(80)
             acceptQtyQuick()
             if not waitCursor(true, 450) then
-                status = 'could not pick ' .. (row.name or '')
+                S.status = 'could not pick ' .. (row.name or '')
                 return
             end
         else
             if not pickFromBankLoc(loc, row.name) then
-                status = 'could not pick from bank: ' .. (row.name or '')
+                S.status = 'could not pick from bank: ' .. (row.name or '')
                 return
             end
         end
-        destroyArmed = {
+        S.destroyArmed = {
             name = row.name,
             id = row.id or 0,
             at = os.clock(),
             where = w,
         }
-        status = 'destroying ' .. row.name
+        S.status = 'destroying ' .. row.name
     end
 
     local function finishDestroy()
-        if not destroyArmed then return false end
+        if not S.destroyArmed then return false end
         local now = os.clock()
         local curName, curId = '', 0
         pcall(function()
             curName = trim(mq.TLO.Cursor.Name())
             curId = tonumber(mq.TLO.Cursor.ID()) or 0
         end)
-        local want = destroyArmed.name or ''
+        local want = S.destroyArmed.name or ''
         local match = (curName ~= '' and curName == want)
-            or (destroyArmed.id > 0 and curId == destroyArmed.id)
+            or (S.destroyArmed.id > 0 and curId == S.destroyArmed.id)
         if match then
             mq.cmd('/destroy')
-            status = 'destroyed ' .. want
-            destroyArmed = nil
-            lastScan = 0
+            S.status = 'destroyed ' .. want
+            S.destroyArmed = nil
+            S.lastScan = 0
             return true
         end
-        local timeout = (destroyArmed.where == 'bank') and 2.0 or 1.2
-        if (now - (destroyArmed.at or now)) > timeout then
-            status = 'destroy failed -- ' .. want .. ' not on cursor'
+        local timeout = (S.destroyArmed.where == 'bank') and 2.0 or 1.2
+        if (now - (S.destroyArmed.at or now)) > timeout then
+            S.status = 'destroy failed -- ' .. want .. ' not on cursor'
             if (mq.TLO.Cursor.ID() or 0) > 0 then mq.cmd('/autoinventory') end
-            destroyArmed = nil
+            S.destroyArmed = nil
             return true
         end
         return true
     end
 
     local function queueMassDestroy(names, where)
-        massDestroyQ = {}
-        massDestroyWhere = where or 'bags'
+        S.massDestroyQ = {}
+        S.massDestroyWhere = where or 'bags'
         for _, name in ipairs(names) do
-            massDestroyQ[#massDestroyQ + 1] = name
+            S.massDestroyQ[#S.massDestroyQ + 1] = name
         end
     end
 
     local function tickMassDestroy()
-        if destroyArmed then return end
-        local where = massDestroyWhere or 'bags'
-        while #massDestroyQ > 0 do
-            local name = massDestroyQ[1]
+        if S.destroyArmed then return end
+        local where = S.massDestroyWhere or 'bags'
+        while #S.massDestroyQ > 0 do
+            local name = S.massDestroyQ[1]
             local loc = findFirstLoc(where, name)
             if not loc then
-                table.remove(massDestroyQ, 1)
+                table.remove(S.massDestroyQ, 1)
                 setChecked(where, name, false)
             else
                 armDestroy({
@@ -1700,12 +1930,12 @@ local function create(opts)
             return o
         end)
         pcall(function() isOpen = not not mq.TLO.Window('Pack' .. pack).Open() end)
-        if isOpen then openedPacks[pack] = true end
+        if isOpen then S.openedPacks[pack] = true end
         return isOpen
     end
 
     local function closeOpenedPacks()
-        for pack in pairs(openedPacks) do
+        for pack in pairs(S.openedPacks) do
             pcall(function()
                 if mq.TLO.Window('Pack' .. pack).Open() then
                     mq.cmdf('/nomodkey /itemnotify pack%d rightmouseup', pack)
@@ -1713,8 +1943,25 @@ local function create(opts)
                 end
             end)
         end
-        openedPacks = {}
+        S.openedPacks = {}
     end
+
+    -- VF: Combine hooks on a table so app.tick stays under 60 upvalues.
+    local xlHooks = {
+        numPacks = packCount(),
+        scan = scan,
+        waitCursor = waitCursor,
+        acceptQty = acceptQtyQuick,
+        dropBags = dropToBags,
+        dropBank = dropToBank,
+        moveAllNamed = moveAllNamed,
+        ensurePackOpen = ensurePackOpen,
+        ensureBankReady = ensureBankReady,
+        beginBankLease = beginBankLease,
+        findFodder = function(name, skip) return findFirstLoc('bags', name, skip) end,
+        status = function(s) S.status = s end,
+        rows = function() return S.rows end,
+    }
 
     -- VF: FindItem each click -- queued pack/slot goes stale when a scroll is consumed.
     local function rightClickByName(itemName)
@@ -1753,29 +2000,29 @@ local function create(opts)
     local function queueScribeAll()
         local why = scribeBlocked()
         if why then
-            status = 'cannot scribe -- ' .. why
+            S.status = 'cannot scribe -- ' .. why
             return
         end
-        lastScan = 0
+        S.lastScan = 0
         scan()
-        memQ = {}
-        memExpect = nil
-        memDone, memSkip, memFail = 0, 0, 0
-        memWaitUntil = 0
+        S.memQ = {}
+        S.memExpect = nil
+        S.memDone, S.memSkip, S.memFail = 0, 0, 0
+        S.memWaitUntil = 0
         local seen = {}
-        for _, row in ipairs(rows) do
+        for _, row in ipairs(S.rows) do
             if row and not row.empty and row.kind and (row.where or 'bags') == 'bags' then
                 local sn = row.spellName ~= '' and row.spellName or row.name
                 local kind = row.kind
                 local key = kind .. ':' .. sn:lower()
                 if alreadyKnown(kind, sn) then
-                    memSkip = memSkip + 1
+                    S.memSkip = S.memSkip + 1
                 elseif seen[key] then
-                    memSkip = memSkip + 1
+                    S.memSkip = S.memSkip + 1
                 else
                     seen[key] = true
                     -- VF: Store full item name (Spell: Foo) for FindItem / itemnotify.
-                    memQ[#memQ + 1] = {
+                    S.memQ[#S.memQ + 1] = {
                         name = row.name,
                         spellName = sn,
                         kind = kind,
@@ -1783,54 +2030,54 @@ local function create(opts)
                 end
             end
         end
-        if #memQ == 0 then
-            status = memSkip > 0 and ('nothing new to scribe (skipped ' .. memSkip .. ')')
+        if #S.memQ == 0 then
+            S.status = S.memSkip > 0 and ('nothing new to scribe (skipped ' .. S.memSkip .. ')')
                 or 'no scribe items in bags'
             return
         end
-        status = string.format('scribe queue %d', #memQ)
+        S.status = string.format('scribe queue %d', #S.memQ)
     end
 
     local function tickScribe()
-        if #memQ == 0 and not memExpect then return end
+        if #S.memQ == 0 and not S.memExpect then return end
         local now = os.clock()
 
-        if memExpect and scribeLanded(memExpect.kind, memExpect.spellName) then
-            memWaitUntil = 0
+        if S.memExpect and scribeLanded(S.memExpect.kind, S.memExpect.spellName) then
+            S.memWaitUntil = 0
         end
-        if now < memWaitUntil then return end
+        if now < S.memWaitUntil then return end
 
-        if memExpect then
-            if scribeLanded(memExpect.kind, memExpect.spellName) then
-                memDone = memDone + 1
+        if S.memExpect then
+            if scribeLanded(S.memExpect.kind, S.memExpect.spellName) then
+                S.memDone = S.memDone + 1
             else
-                memFail = memFail + 1
+                S.memFail = S.memFail + 1
             end
             clearCursorQuiet()
-            memExpect = nil
-            lastScan = 0
-            if #memQ == 0 then
+            S.memExpect = nil
+            S.lastScan = 0
+            if #S.memQ == 0 then
                 closeSpellBook()
                 closeOpenedPacks()
-                status = string.format('scribe done -- %d ok, %d skip, %d fail', memDone, memSkip, memFail)
+                S.status = string.format('scribe done -- %d ok, %d skip, %d fail', S.memDone, S.memSkip, S.memFail)
                 return
             end
         end
 
-        if #memQ == 0 then return end
+        if #S.memQ == 0 then return end
 
         local why = scribeBlocked()
         if why then
-            status = 'scribe paused -- ' .. why .. ' (' .. #memQ .. ' left)'
-            memWaitUntil = now + 0.75
+            S.status = 'scribe paused -- ' .. why .. ' (' .. #S.memQ .. ' left)'
+            S.memWaitUntil = now + 0.75
             return
         end
 
         local job
-        while #memQ > 0 do
-            local cand = table.remove(memQ, 1)
+        while #S.memQ > 0 do
+            local cand = table.remove(S.memQ, 1)
             if alreadyKnown(cand.kind, cand.spellName) then
-                memSkip = memSkip + 1
+                S.memSkip = S.memSkip + 1
             else
                 job = cand
                 break
@@ -1839,108 +2086,181 @@ local function create(opts)
         if not job then
             closeSpellBook()
             closeOpenedPacks()
-            status = string.format('scribe done -- %d ok, %d skip, %d fail', memDone, memSkip, memFail)
+            S.status = string.format('scribe done -- %d ok, %d skip, %d fail', S.memDone, S.memSkip, S.memFail)
             return
         end
 
         clearCursorQuiet()
         if not rightClickByName(job.name) then
-            memFail = memFail + 1
-            status = 'not found: ' .. (job.name or '?')
+            S.memFail = S.memFail + 1
+            S.status = 'not found: ' .. (job.name or '?')
             return
         end
-        memExpect = job
-        memWaitUntil = now + ((job.kind == 'disc') and 2.5 or 3.5)
-        status = string.format('scribing %s (%s, %d left)', job.spellName, job.kind, #memQ)
+        S.memExpect = job
+        S.memWaitUntil = now + ((job.kind == 'disc') and 2.5 or 3.5)
+        S.status = string.format('scribing %s (%s, %d left)', job.spellName, job.kind, #S.memQ)
     end
 
     -- VF: click ops fire in ImGui. Tick handles sell / scribe / bank moves (delays).
     local function clickNow(op, row)
         if op == 'vaultmerch' then
             mq.cmd('/say #vault_merchant')
-            status = 'summoned vault merchant'
+            S.status = 'summoned vault merchant'
         elseif op == 'openbank' then
             ensureBankOpen()
         elseif op == 'autoinv' then
             mq.cmd('/autoinventory')
-            status = 'inventoried'
+            S.status = 'inventoried'
         elseif op == 'dropbags' then
-            pcall(dropToBags)
-        elseif op == 'dropbank' then
-            pcall(dropToBank)
-        elseif op == 'masssell' then
-            if merchantOpen() == false then
-                status = 'open a vendor to Sell'
+            local cid = mq.TLO.Cursor.ID() or 0
+            if cid <= 0 then
+                S.view = 'bags'
+                S.status = 'bags'
                 return
             end
-            if view ~= 'bags' then
-                status = 'Sell is bags-only'
+            local nm = ''
+            pcall(function() nm = trim(mq.TLO.Cursor.Name()) end)
+            enqueueJob({ op = 'putcursor', dest = 'bags', name = nm })
+            S.status = 'queued to bags'
+        elseif op == 'dropbank' then
+            local cid = mq.TLO.Cursor.ID() or 0
+            if cid <= 0 then
+                S.view = 'bank'
+                S.status = 'bank'
+                return
+            end
+            local nm = ''
+            pcall(function() nm = trim(mq.TLO.Cursor.Name()) end)
+            enqueueJob({ op = 'putcursor', dest = 'bank', name = nm })
+            S.status = 'queued to bank'
+        elseif op == 'masssell' then
+            if merchantOpen() == false then
+                S.status = 'open a vendor to Sell'
+                return
+            end
+            if S.view ~= 'bags' then
+                S.status = 'Sell is bags-only'
                 return
             end
             local names, skipped = pruneChecksForSell('bags')
             if #names == 0 then
-                status = skipped > 0 and 'nothing sellable in selection'
+                S.status = skipped > 0 and 'nothing sellable in selection'
                     or 'check items to sell'
                 return
             end
-            pending = { op = 'masssell', names = names, i = 1, sold = 0 }
-            status = skipped > 0
+            S.pending = { op = 'masssell', names = names, i = 1, sold = 0 }
+            S.status = skipped > 0
                 and string.format('selling %d (skipped %d)...', #names, skipped)
                 or string.format('selling %d...', #names)
             return
         elseif op == 'massdelete' then
             if merchantOpen() then
-                status = 'close vendor before Delete'
+                S.status = 'close vendor before Delete'
                 return
             end
-            if view == 'bank' and not bankOpen() then
-                status = 'open bank to delete from bank'
+            if S.view ~= 'bags' and S.view ~= 'bank' then
+                S.status = 'Delete is Bags or Bank only'
                 return
             end
-            if view ~= 'bags' and view ~= 'bank' then
-                status = 'Delete is Bags or Bank only'
-                return
-            end
-            local names = checkedNames(view)
+            local names = checkedNames(S.view)
             if #names == 0 then
-                status = 'check items to delete'
+                S.status = 'check items to delete'
                 return
             end
-            queueMassDestroy(names, view)
-            status = string.format('deleting %d...', #names)
+            queueMassDestroy(names, S.view)
+            S.status = string.format('deleting %d...', #names)
             return
         elseif op == 'massmove' then
             if merchantOpen() then
-                status = 'close vendor before Move'
+                S.status = 'close vendor before Move'
                 return
             end
-            local where = view
+            local where = S.view
             local names = checkedNames(where, true)
             if #names == 0 then
-                status = 'check items to move'
+                S.status = 'check items to move'
                 return
             end
-            pending = {
+            enqueueJob({
                 op = 'massmove',
                 toBank = (where == 'bags'),
                 names = names,
                 i = 1,
                 moved = 0,
-            }
-            status = string.format('moving %d...', #names)
+            })
+            S.status = string.format('queued %d...', #names)
+            return
+        elseif op == 'pullneeded' then
+            if merchantOpen() then
+                S.status = 'close vendor first'
+                return
+            end
+            S.lastScan = 0
+            scan(true)
+            local names = augs.neededBankNames(S.rows, S.augFamily, S.includeWorn)
+            if #names == 0 then
+                S.status = 'nothing to pull'
+                return
+            end
+            enqueueJob({
+                op = 'massmove',
+                toBank = false,
+                names = names,
+                i = 1,
+                moved = 0,
+            })
+            S.status = string.format('queued pull %d...', #names)
+            return
+        elseif op == 'pushtobank' then
+            if merchantOpen() then
+                S.status = 'close vendor first'
+                return
+            end
+            S.lastScan = 0
+            scan(true)
+            local names = augs.bagFamilyNames(S.rows, S.augFamily, S.augFlavor)
+            if #names == 0 then
+                S.status = 'nothing in bags to push'
+                return
+            end
+            enqueueJob({
+                op = 'massmove',
+                toBank = true,
+                names = names,
+                i = 1,
+                moved = 0,
+            })
+            S.status = string.format('queued bank %d...', #names)
+            return
+        elseif op == 'xlcombine' then
+            if merchantOpen() then
+                S.status = 'close vendor first'
+                return
+            end
+            if not S.augFlavor then
+                S.status = 'pick a flavor'
+                return
+            end
+            enqueueJob({
+                op = 'xlcombine',
+                pack = augs.COMBINE_PACK,
+                family = S.augFamily,
+                flavor = S.augFlavor,
+            })
+            S.status = 'queued combine'
             return
         elseif op == 'turnin' then
-            if view ~= 'bags' then
-                status = 'Turn-In is bags only'
+            if S.view ~= 'bags' then
+                S.status = 'Turn-In is bags only'
                 return
             end
             if (mq.TLO.Target.ID() or 0) <= 0 then
-                status = 'target an NPC first'
+                S.status = 'target an NPC first'
                 return
             end
             local names = checkedNames('bags', true)
             if #names == 0 then
-                status = 'check items to turn in'
+                S.status = 'check items to turn in'
                 return
             end
             local tname = ''
@@ -1948,26 +2268,26 @@ local function create(opts)
                 tname = trim(mq.TLO.Target.CleanName() or mq.TLO.Target.Name() or '')
             end)
             if tname == '' or tname == 'NULL' then tname = 'target' end
-            turninConfirm = { names = names, target = tname }
+            S.turninConfirm = { names = names, target = tname }
             return
         elseif op == 'turningo' then
             -- VF: Starts after confirm popup.
-            local names = turninConfirm and turninConfirm.names or checkedNames('bags', true)
-            turninConfirm = nil
-            if view ~= 'bags' then
-                status = 'Turn-In is bags only'
+            local names = S.turninConfirm and S.turninConfirm.names or checkedNames('bags', true)
+            S.turninConfirm = nil
+            if S.view ~= 'bags' then
+                S.status = 'Turn-In is bags only'
                 return
             end
             if (mq.TLO.Target.ID() or 0) <= 0 then
-                status = 'target an NPC first'
+                S.status = 'target an NPC first'
                 return
             end
             if not names or #names == 0 then
-                status = 'check items to turn in'
+                S.status = 'check items to turn in'
                 return
             end
-            pending = { op = 'turnin', names = names, i = 1, done = 0 }
-            status = string.format('turning in %d stacks...', #names)
+            S.pending = { op = 'turnin', names = names, i = 1, done = 0 }
+            S.status = string.format('turning in %d stacks...', #names)
             return
         elseif op == 'inspect' then
             pcall(inspectItem, row)
@@ -1975,31 +2295,31 @@ local function create(opts)
             pcall(armDestroy, row)
         elseif op == 'pick' then
             pcall(pickup, row, false)
-            if pending then return end
+            if S.pending then return end
         elseif op == 'pickone' then
             pcall(pickup, row, true)
-            if pending then return end
+            if S.pending then return end
         elseif op == 'sell' or op == 'scribeall' or op == 'memall' then
-            pending = { op = op, row = row }
+            S.pending = { op = op, row = row }
             return
         end
-        lastScan = 0
+        S.lastScan = 0
     end
 
     local function setOpen(v)
-        openGUI = not not v
-        if openGUI then lastScan = 0 end
+        S.openGUI = not not v
+        if S.openGUI then S.lastScan = 0 end
     end
 
     local app = {}
 
     function app.isOpen()
-        return openGUI
+        return S.openGUI
     end
 
     function app.toggle()
-        setOpen(not openGUI)
-        return openGUI
+        setOpen(not S.openGUI)
+        return S.openGUI
     end
 
     function app.setOpen(v)
@@ -2007,47 +2327,63 @@ local function create(opts)
     end
 
     function app.hasPending()
-        return pending ~= nil or destroyArmed ~= nil or #massDestroyQ > 0
+        return S.pending ~= nil or S.destroyArmed ~= nil or #S.massDestroyQ > 0 or (S.jobQ and #S.jobQ > 0)
     end
 
-    local lastLockReload = 0
+    S.lastLockReload = 0
 
     function app.tick()
         pcall(flushLocks)
-        if not locksDirty and (os.clock() - lastLockReload) > 2.0 then
-            lastLockReload = os.clock()
+        if not S.locksDirty and (os.clock() - S.lastLockReload) > 2.0 then
+            S.lastLockReload = os.clock()
             pcall(reloadLocks)
         end
         pcall(tickBankWatch)
+        pcall(function()
+            local Up = require('vft.inv.update')
+            if Up.tick then Up.tick() end
+        end)
         pcall(tickScribe)
         finishDestroy()
         pcall(tickMassDestroy)
-        if pending then
-            local job = pending
+        if not S.pending then pumpJobs() end
+        if S.pending then
+            local job = S.pending
             if job.op == 'sell' then
-                pending = nil
+                S.pending = nil
                 pcall(sell, job.row)
             elseif job.op == 'scribeall' or job.op == 'memall' then
-                pending = nil
+                S.pending = nil
                 pcall(queueScribeAll)
             elseif job.op == 'movetobank' then
-                pending = nil
+                beginBankLease()
+                S.pending = nil
                 pcall(moveAllNamed, true, job.name)
             elseif job.op == 'movetobags' then
-                pending = nil
+                beginBankLease()
+                S.pending = nil
                 pcall(moveAllNamed, false, job.name)
+            elseif job.op == 'putcursor' then
+                S.pending = nil
+                if job.dest == 'bank' then
+                    pcall(dropToBank)
+                else
+                    pcall(dropToBags)
+                end
+                S.status = (job.dest == 'bank' and 'to bank' or 'to bags')
+                    .. ((job.name and job.name ~= '') and (' ' .. job.name) or '')
             elseif job.op == 'masssell' then
                 local i = job.i or 1
                 local name = job.names and job.names[i]
                 dbg('masssell tick i=%d name=%s sold=%s', i, tostring(name), tostring(job.sold))
                 if not name then
-                    pending = nil
+                    S.pending = nil
                     clearChecks()
-                    status = string.format('sold %d groups', job.sold or 0)
+                    S.status = string.format('sold %d groups', job.sold or 0)
                     dbg('masssell done sold=%s', tostring(job.sold))
                 elseif not merchantOpen() then
-                    pending = nil
-                    status = 'vendor closed, sold ' .. tostring(job.sold or 0)
+                    S.pending = nil
+                    S.status = 'vendor closed, sold ' .. tostring(job.sold or 0)
                     dbg('masssell abort: vendor closed')
                 else
                     local n = sellAllNamed(name) or 0
@@ -2055,37 +2391,37 @@ local function create(opts)
                     job.sold = (job.sold or 0) + (n > 0 and 1 or 0)
                     setChecked('bags', name, false)
                     job.i = i + 1
-                    status = string.format('sold %s (%d/%d)', name, i, #(job.names or {}))
+                    S.status = string.format('sold %s (%d/%d)', name, i, #(job.names or {}))
                 end
             elseif job.op == 'massmove' then
                 local i = job.i or 1
                 local name = job.names and job.names[i]
                 if not name then
-                    pending = nil
+                    S.pending = nil
                     clearChecks()
-                    status = string.format('moved %d groups', job.moved or 0)
+                    S.status = string.format('moved %d groups', job.moved or 0)
                 elseif merchantOpen() then
-                    pending = nil
-                    status = 'close vendor first'
+                    S.pending = nil
+                    S.status = 'close vendor first'
                 else
                     local n = moveAllNamed(job.toBank, name) or 0
                     job.moved = (job.moved or 0) + (n > 0 and 1 or 0)
                     local where = job.toBank and 'bags' or 'bank'
                     setChecked(where, name, false)
                     job.i = i + 1
-                    status = string.format('moved %s (%d/%d)', name, i, #(job.names or {}))
+                    S.status = string.format('moved %s (%d/%d)', name, i, #(job.names or {}))
                 end
             elseif job.op == 'turnin' then
                 -- VF: Plow each checked name until FindItemCount is 0 (handinsingle loop).
                 local i = job.i or 1
                 local name = job.names and job.names[i]
                 if not name then
-                    pending = nil
+                    S.pending = nil
                     clearChecks()
-                    status = string.format('turned in %d', job.done or 0)
+                    S.status = string.format('turned in %d', job.done or 0)
                 elseif (mq.TLO.Target.ID() or 0) <= 0 then
-                    pending = nil
-                    status = 'no target'
+                    S.pending = nil
+                    S.status = 'no target'
                 else
                     local left = 0
                     pcall(function()
@@ -2094,47 +2430,81 @@ local function create(opts)
                     if left < 1 then
                         setChecked('bags', name, false)
                         job.i = i + 1
-                        status = string.format('turn-in (%d/%d)', i, #(job.names or {}))
+                        S.status = string.format('turn-in (%d/%d)', i, #(job.names or {}))
                     elseif handinOne(name) then
                         job.done = (job.done or 0) + 1
-                        status = string.format('turn-in %s (%d left)', name, math.max(0, left - 1))
-                        lastScan = 0
+                        S.status = string.format('turn-in %s (%d left)', name, math.max(0, left - 1))
+                        S.lastScan = 0
                     else
                         setChecked('bags', name, false)
                         job.i = i + 1
-                        status = 'turn-in failed: ' .. name
+                        S.status = 'turn-in failed: ' .. name
                     end
                 end
             elseif job.op == 'pickbank' then
-                pending = nil
+                beginBankLease()
                 local row = job.row
-                if row and not row.empty and ensureBankReady() then
-                    local loc = rowLoc(row, 1)
-                    if pickFromBankLoc(loc, row.name) then
-                        status = 'picked ' .. (row.name or '')
-                    else
-                        status = 'could not pick from bank: ' .. (row.name or '')
-                    end
+                if not row or row.empty then
+                    S.pending = nil
+                    S.status = 'nothing to pick'
+                elseif not ensureBankReady() then
+                    S.pending = nil
+                    S.status = 'Bank window not open'
                 else
-                    status = 'Bank window not open'
+                    local loc = rowLoc(row, 1)
+                    local ok = false
+                    if job.one then
+                        local bank = tonumber(loc.bank) or 0
+                        local slot = tonumber(loc.slot) or 0
+                        if bank > 0 then
+                            if (mq.TLO.Cursor.ID() or 0) > 0 then
+                                mq.cmd('/autoinventory')
+                                waitCursor(false, 200)
+                            end
+                            if slot > 0 then
+                                openBankBag(bank)
+                                mq.cmdf('/nomodkey /ctrlkey /itemnotify in bank%d %d leftmouseup', bank, slot)
+                            else
+                                mq.cmdf('/nomodkey /ctrlkey /itemnotify bank%d leftmouseup', bank)
+                            end
+                            acceptQtyQuick()
+                            ok = waitCursor(true, 450)
+                        end
+                    else
+                        ok = pickFromBankLoc(loc, row.name)
+                    end
+                    S.pending = nil
+                    S.status = ok and ('picked ' .. (row.name or ''))
+                        or ('could not pick from bank: ' .. (row.name or ''))
+                end
+            elseif job.op == 'xlcombine' then
+                beginBankLease()
+                xlHooks.numPacks = packCount()
+                local ran, ok, msg = pcall(augs.runCombine, job, xlHooks)
+                S.pending = nil
+                if not ran then
+                    S.status = tostring(ok or 'combine error')
+                else
+                    S.status = msg or (ok and 'combined' or 'combine failed')
                 end
             else
-                pending = nil
+                S.pending = nil
             end
-            lastScan = 0
-            return
+            S.lastScan = 0
         end
+        if not S.pending then pumpJobs() end
+        if not S.pending then endBankLease() end
     end
 
     function app.draw()
-        if not openGUI then return end
+        if not S.openGUI then return end
         finishDestroy()
         scan()
         pushTheme()
-        -- VF: Taller default so header + table + AutoInv/Power + Close fit without an outer scrollbar.
-        ImGui.SetNextWindowSize(580, 620, ImGuiCond.FirstUseEver)
+        -- VF: Taller default so header + table + INV/Bank/XP + Close fit without an outer scrollbar.
+        ImGui.SetNextWindowSize(720, 640, ImGuiCond.FirstUseEver)
         pcall(function()
-            ImGui.SetNextWindowSizeConstraints(480, 600, 1400, 1200)
+            ImGui.SetNextWindowSizeConstraints(520, 600, 1600, 1400)
         end)
         local winFlags = 0
         local F = ImGuiWindowFlags
@@ -2174,17 +2544,17 @@ local function create(opts)
                     end
                 end)
                 if ImGui.SmallButton('?##vfInvHelp') then
-                    showHelp = not showHelp
+                    S.showHelp = not S.showHelp
                 end
                 if ImGui.IsItemHovered() then
-                    setTip(showHelp and 'Hide help' or 'Help')
+                    setTip(S.showHelp and 'Hide help' or 'Help')
                 end
             end
             if brand.drawGradientRule then brand.drawGradientRule() end
 
             -- VF: Bags | Bank tabs - same TAB_ON / TAB_OFF / TAB_HOVER as mgr.
             local function tabBtn(label, key)
-                local on = view == key
+                local on = S.view == key
                 local Col = ImGuiCol or _G.ImGuiCol
                 local pushed = 0
                 if Col and Col.Button then
@@ -2201,12 +2571,12 @@ local function create(opts)
                         pushed = pushed + 1
                     end
                 end
-                if ImGui.Button(label .. '##vfInvTab' .. key, 64, 24) then
-                    if view ~= key then
-                        view = key
+                if ImGui.Button(label .. '##vfInvTab' .. key, 78, 24) then
+                    if S.view ~= key then
+                        S.view = key
+                        S.filter = ''
                         clearChecks()
-                        lastScan = 0
-                        if key == 'bank' then ensureBankOpen() end
+                        S.lastScan = 0
                     end
                 end
                 if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
@@ -2214,17 +2584,56 @@ local function create(opts)
             end
             tabBtn('Bags', 'bags')
             tabBtn('Bank', 'bank')
+            tabBtn('Augs', 'augs')
+            tabBtn('Settings', 'settings')
             ImGui.NewLine()
 
-            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
-                string.format('%d items - %d free - %d packs', used, free, packs))
-            if view == 'bank' and not bankOpen() then
+            if S.view == 'settings' then
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Inventory')
+                S.hideTooltips = ImGui.Checkbox('Hide tooltips##vfInvHideTips', S.hideTooltips)
+                ImGui.Separator()
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Augs')
+                S.includeWorn = ImGui.Checkbox('Count worn augs##vfInvIncWorn', S.includeWorn)
+                if ImGui.IsItemHovered() then
+                    setTip('Equipped legendaries count on the left (W and quest total). Off = loose only.')
+                end
+                S.xlMath = ImGui.Checkbox('XL 16-base math##vfInvXlMath', S.xlMath)
+                if ImGui.IsItemHovered() then
+                    setTip('Need line uses XL Gnomish Quadramorphic Combinerator (16 base = 1 legendary).')
+                end
+                ImGui.Separator()
+                if augs.vfRunning() then
+                    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+                        'VF is running -- suite Update owns overlay.')
+                else
+                    local Up = nil
+                    pcall(function() Up = require('vft.inv.update') end)
+                    if Up then
+                        if not Up.state then
+                            pcall(function() Up.install() end)
+                        end
+                        if Up.drawPanel then Up.drawPanel() end
+                    else
+                        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+                            'vft.inv.update missing -- /lua run vfi will install it.')
+                    end
+                end
+            else
+
+            if S.view == 'augs' then
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+                    string.format('%d items  bags+bank +gear', S.used))
+            else
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
+                    string.format('%d items - %d free - %d packs', S.used, S.free, S.packs))
+            end
+            if (S.view == 'bank' or S.view == 'augs') and not bankOpen() then
                 ImGui.SameLine()
                 ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '- bank closed')
             end
 
             ImGui.SetNextItemWidth(200)
-            filter = ImGui.InputText('##bagfilter', filter or '')
+            S.filter = ImGui.InputText('##bagfilter', S.filter or '')
             --[[ VF: Trace - re-enable when debugging sell/moves
             ImGui.SameLine()
             bagTrace = ImGui.Checkbox('Trace##vfInvTrace', bagTrace)
@@ -2233,18 +2642,18 @@ local function create(opts)
             end
             --]]
             ImGui.SameLine()
-            if ImGui.Button('Refresh##vfInvRefresh', 70, 24) then lastScan = 0 end
-            if view == 'bags' then
+            if ImGui.Button('Refresh##vfInvRefresh', 70, 24) then S.lastScan = 0 end
+            if S.view == 'bags' then
                 ImGui.SameLine()
-                local memBusy = (#memQ > 0) or (memExpect ~= nil)
+                local memBusy = (#S.memQ > 0) or (S.memExpect ~= nil)
                 if memBusy then
                     if ImGui.Button('Stop##vfInvScribeStop', 88, 24) then
-                        memQ = {}
-                        memExpect = nil
-                        memWaitUntil = 0
+                        S.memQ = {}
+                        S.memExpect = nil
+                        S.memWaitUntil = 0
                         closeSpellBook()
                         closeOpenedPacks()
-                        status = string.format('scribe stopped -- %d ok, %d skip, %d fail', memDone, memSkip, memFail)
+                        S.status = string.format('scribe stopped -- %d ok, %d skip, %d fail', S.memDone, S.memSkip, S.memFail)
                     end
                 else
                     if ImGui.Button('Scribe All##vfInvScribeAll', 88, 24) then
@@ -2261,9 +2670,46 @@ local function create(opts)
                 if ImGui.IsItemHovered() then
                     setTip("Summons Triune's Vault Merchant.")
                 end
-            else
+            elseif S.view == 'bank' then
                 ImGui.SameLine()
                 if ImGui.Button('Open Bank##vfInvOpenBank', 90, 24) then clickNow('openbank') end
+            else
+                ImGui.SameLine()
+                if ImGui.Button('Open Bank##vfInvOpenBankAugs', 90, 24) then clickNow('openbank') end
+                ImGui.SameLine()
+                if ImGui.Button('Pull needed##vfInvPullNeed', 110, 24) then
+                    clickNow('pullneeded')
+                end
+                if ImGui.IsItemHovered() then
+                    setTip('Move unfinished-flavor augs from bank into bags.')
+                end
+                ImGui.SameLine()
+                if ImGui.Button('Push to bank##vfInvPushAugs', 120, 24) then
+                    clickNow('pushtobank')
+                end
+                if ImGui.IsItemHovered() then
+                    setTip('Move this family\'s augs from bags into the bank. Worn stay in gear.')
+                end
+                ImGui.SameLine()
+                local plan, planErr = nil, 'pick a flavor'
+                if S.augFlavor then
+                    plan, planErr = augs.xlPlan(S.rows, S.augFamily, S.augFlavor)
+                end
+                local canCombine = plan ~= nil
+                if not canCombine then ImGui.BeginDisabled() end
+                if ImGui.Button('Combine##vfInvXlCombine', 88, 24) then
+                    clickNow('xlcombine')
+                end
+                if not canCombine then ImGui.EndDisabled() end
+                if ImGui.IsItemHovered() then
+                    local tip = planErr or 'pick a flavor'
+                    if plan then
+                        local tool = (plan.combiner == 'xl') and 'XL Combinerator' or 'Gnomish Combinerator'
+                        tip = string.format('Combine %d into %s with the %s (pack 10).',
+                            plan.need, plan.result, tool)
+                    end
+                    setTip(tip)
+                end
             end
 
             local canSell = merchantOpen()
@@ -2274,10 +2720,12 @@ local function create(opts)
             local NS = ImGuiTableColumnFlags.NoSort or 0
             local DS = ImGuiTableColumnFlags.DefaultSort or 0
 
-            -- VF: Table owns vertical scroll. Reserve slots + Close strip so the window does not clip.
-            local SLOT_W, SLOT_H = 104, 54
+            -- VF: Table owns vertical scroll. Footer is INV | Bank | XP + Close.
+            local SQ, GAP = 50, 6
+            local GRID_W = SQ * 3 + GAP * 2
+            local GRID_H = 62
             local CLOSE_STRIP = 48
-            local FOOTER_H = SLOT_H + CLOSE_STRIP
+            local FOOTER_H = GRID_H + CLOSE_STRIP
             local bodyH = 280
             pcall(function()
                 if ImGui.GetContentRegionAvailVec then
@@ -2304,90 +2752,92 @@ local function create(opts)
                 return wf
             end
 
-            local function drawDropBox(w, h)
-                local hasCur = (mq.TLO.Cursor.ID() or 0) > 0
+            local function drawSq(id, label, onClick, tip, inner)
                 local cf = (ImGuiChildFlags and ImGuiChildFlags.Borders) or true
-                if ImGui.BeginChild('taDropInv', w, h, cf, slotChildFlags()) then
-                    if hasCur then
-                        local icon = 0
-                        pcall(function() icon = tonumber(mq.TLO.Cursor.Icon()) or 0 end)
-                        drawIcon(icon)
-                        ImGui.SameLine()
-                        ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], 'AutoInv')
+                if ImGui.BeginChild(id, SQ, SQ, cf, slotChildFlags()) then
+                    if inner then
+                        inner()
                     else
-                        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'AutoInv')
+                        local tw = 28
+                        pcall(function()
+                            local w = ImGui.CalcTextSize(label)
+                            if type(w) == 'number' then tw = w
+                            elseif w and w.x then tw = w.x end
+                        end)
+                        local x = math.max(2, (SQ - tw) * 0.5)
+                        local y = math.max(2, (SQ - 14) * 0.5)
+                        pcall(function() ImGui.SetCursorPos(x, y) end)
+                        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], label)
                     end
                     if ImGui.IsWindowHovered() and ImGui.IsMouseClicked(0) then
-                        clickNow('autoinv')
+                        onClick()
                     end
                 end
                 ImGui.EndChild()
-                if ImGui.IsItemHovered() then
-                    setTip('/autoinventory')
-                end
+                if ImGui.IsItemHovered() then setTip(tip) end
             end
 
-            -- VF: Triune Power Source. Exp is server custom data; MQ reads TLOs + INI/cache.
-            local function drawPowerSourceBox(w, h)
+            -- VF: Filled slot = item icon; empty shows growth % (or XP).
+            local function sqXp()
                 local info = powerSrc.info()
                 local psName = info.name or ''
                 local psIcon = info.icon or 0
-                local psPct = info.pct
-                local cf = (ImGuiChildFlags and ImGuiChildFlags.Borders) or true
-                if ImGui.BeginChild('taPowerSrc', w, h, cf, slotChildFlags()) then
-                    if psName ~= '' and psName ~= 'NULL' and not info.empty then
-                        if psIcon > 0 then
-                            drawIcon(psIcon)
-                            ImGui.SameLine()
-                        end
-                        if psPct ~= nil then
-                            ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4],
-                                string.format('%.1f%%', psPct))
-                        else
-                            ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '--%')
-                        end
-                    else
-                        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Power')
-                        ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], '(empty)')
-                    end
-                    if ImGui.IsWindowHovered() and ImGui.IsMouseClicked(0) then
-                        -- VF: Triune unique. Place/pick PowerSource.
-                        mq.cmd('/nomodkey /itemnotify powersource leftmouseup')
-                        lastScan = 0
-                        status = 'power source'
-                    end
+                if psName ~= '' and psName ~= 'NULL' and not info.empty and psIcon > 0 then
+                    pcall(function() ImGui.SetCursorPos((SQ - ICON_SIZE) * 0.5, (SQ - ICON_SIZE) * 0.5) end)
+                    drawIcon(psIcon)
+                    return
                 end
-                ImGui.EndChild()
-                if ImGui.IsItemHovered() then
-                    local tip = 'Triune Power Source\nClick to place or pick.'
-                    if psName ~= '' and psName ~= 'NULL' and not info.empty then
-                        tip = psName
-                        if psPct ~= nil then
-                            tip = tip .. string.format('\n%.2f%% grown', psPct)
-                            if info.source and info.source ~= '' then
-                                tip = tip .. ' (' .. tostring(info.source) .. ')'
-                            end
-                        else
-                            tip = tip .. '\nGrowth % not on client yet'
-                        end
-                        tip = tip .. '\nClick to swap'
-                    end
-                    setTip(tip)
+                local txt = 'XP'
+                local col = MUTED
+                if info.pct ~= nil then
+                    txt = string.format('%.0f%%', info.pct)
+                    col = GOOD
                 end
+                local tw = 28
+                pcall(function()
+                    local w = ImGui.CalcTextSize(txt)
+                    if type(w) == 'number' then tw = w elseif w and w.x then tw = w.x end
+                end)
+                pcall(function() ImGui.SetCursorPos(math.max(2, (SQ - tw) * 0.5), (SQ - 14) * 0.5) end)
+                ImGui.TextColored(col[1], col[2], col[3], col[4], txt)
             end
 
             -- VF: ScrollY needs a positive outer height - -1 inside a child was clipping with no bar.
-            if ImGui.BeginTable('taAllBags', 5, tblFlags, 0, bodyH) then
+            local augsList = true
+            if S.view == 'augs' then
+                if ImGui.BeginChild('vfAugsNav', 286, bodyH, true) then
+                    local shop = {
+                        family = S.augFamily,
+                        flavor = S.augFlavor,
+                        includeWorn = S.includeWorn,
+                        xlMath = S.xlMath,
+                        rows = S.rows,
+                        muted = MUTED,
+                        good = GOOD,
+                        tabOn = TAB_ON,
+                        tabOff = TAB_OFF,
+                        tabHover = TAB_HOVER,
+                    }
+                    augs.drawShop(ImGui, shop)
+                    S.augFamily = shop.family
+                    S.augFlavor = shop.flavor
+                end
+                ImGui.EndChild()
+                ImGui.SameLine()
+                augsList = ImGui.BeginChild('vfAugsList', 0, bodyH, false)
+            end
+            if augsList and ImGui.BeginTable('taAllBags', 5, tblFlags, 0, S.view == 'augs' and 0 or bodyH) then
                 ImGui.TableSetupColumn('##sel', bitbor(ImGuiTableColumnFlags.WidthFixed, NS), 28)
                 ImGui.TableSetupColumn('Item', bitbor(ImGuiTableColumnFlags.WidthStretch, DS), 0, BAG_COL_ITEM)
                 ImGui.TableSetupColumn('Qty', ImGuiTableColumnFlags.WidthFixed, 44, BAG_COL_QTY)
-                ImGui.TableSetupColumn('Price', ImGuiTableColumnFlags.WidthFixed, 88, BAG_COL_PRICE)
+                ImGui.TableSetupColumn(S.view == 'augs' and 'Loc' or 'Price',
+                    ImGuiTableColumnFlags.WidthFixed, S.view == 'augs' and 52 or 88, BAG_COL_PRICE)
                 ImGui.TableSetupColumn('Lock', bitbor(ImGuiTableColumnFlags.WidthFixed, NS), 40, BAG_COL_LOCK)
                 pcall(function() ImGui.TableSetupScrollFreeze(0, 1) end)
                 ImGui.TableHeadersRow()
 
                 local shown = {}
-                for _, row in ipairs(rows) do
+                for _, row in ipairs(S.rows) do
                     if matches(row) then shown[#shown + 1] = row end
                 end
                 local sort_specs = ImGui.TableGetSortSpecs()
@@ -2431,7 +2881,22 @@ local function create(opts)
                             clickNow('inspect', row)
                         end
                         ImGui.SameLine()
-                        if ImGui.Selectable(row.name .. '##r' .. i, false) then
+                        local showName = row.name
+                        local tierCol = nil
+                        if S.view == 'augs' then
+                            local short, tier = augs.displayName(row.name)
+                            if short and short ~= '' then showName = short end
+                            if tier and augs.TIER[tier] then tierCol = augs.TIER[tier] end
+                        end
+                        local pushedTxt = 0
+                        if tierCol then
+                            local Col = ImGuiCol or _G.ImGuiCol
+                            if Col and Col.Text
+                                and pcall(ImGui.PushStyleColor, Col.Text, tierCol[1], tierCol[2], tierCol[3], tierCol[4]) then
+                                pushedTxt = 1
+                            end
+                        end
+                        if ImGui.Selectable(showName .. '##r' .. i, false) then
                             local ctrl = false
                             pcall(function()
                                 local io = ImGui.GetIO()
@@ -2439,6 +2904,7 @@ local function create(opts)
                             end)
                             clickNow(ctrl and 'pickone' or 'pick', row)
                         end
+                        if pushedTxt > 0 then pcall(ImGui.PopStyleColor, pushedTxt) end
                         if rightClicked() then
                             clickNow('inspect', row)
                         end
@@ -2448,7 +2914,17 @@ local function create(opts)
                             if (row.copies or 1) > 1 then
                                 tip = tip .. string.format('\n%d slots, qty %d', row.copies, row.qty or 0)
                             end
-                            if row.loc and row.loc ~= '' then tip = tip .. '\n' .. row.loc end
+                            if row.loc and row.loc ~= '' then
+                                if S.view == 'augs' then
+                                    if row.where == 'worn' then
+                                        tip = tip .. '\n' .. row.loc
+                                    else
+                                        tip = tip .. '\n' .. (row.where or '') .. ' ' .. row.loc
+                                    end
+                                else
+                                    tip = tip .. '\n' .. row.loc
+                                end
+                            end
                             tip = tip .. '\nCtrl+click: take 1'
                             setTip(tip)
                         end
@@ -2460,7 +2936,11 @@ local function create(opts)
                         ImGui.Text(tostring(row.qty))
                     end
                     ImGui.TableNextColumn()
-                    ImGui.Text(row.price or '-')
+                    if S.view == 'augs' then
+                        ImGui.Text(row.empty and '-' or augs.locLabel(row))
+                    else
+                        ImGui.Text(row.price or '-')
+                    end
                     ImGui.TableNextColumn()
                     if row.empty then
                         ImGui.Dummy(1, 1)
@@ -2486,38 +2966,45 @@ local function create(opts)
                     ImGui.TableNextColumn()
                     ImGui.Dummy(1, 1)
                     ImGui.TableNextColumn()
-                    local emptyMsg = view == 'bank'
-                        and (bankOpen() and 'Bank empty.' or 'Open bank first.')
-                        or 'No bag items.'
+                    local emptyMsg = 'No bag items.'
+                    if S.view == 'bank' then
+                        emptyMsg = (bankOpen() and 'Bank empty.' or 'Open bank first.')
+                    elseif S.view == 'augs' then
+                        emptyMsg = 'No augs in this family.'
+                    end
                     ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4],
-                        filter ~= '' and 'No matches.' or emptyMsg)
+                        S.filter ~= '' and 'No matches.' or emptyMsg)
                     ImGui.TableNextColumn(); ImGui.Dummy(1, 1)
                     ImGui.TableNextColumn(); ImGui.Dummy(1, 1)
                     ImGui.TableNextColumn(); ImGui.Dummy(1, 1)
                 end
                 ImGui.EndTable()
             end
+            if S.view == 'augs' then ImGui.EndChild() end
 
-            -- VF: Left = mass actions + coins; right = Drop | Power on one row spanning both.
-            local nChk = countChecked(view)
-            local railW = SLOT_W * 2 + 8
+            -- VF: Left = mass actions + coins; right = INV | Bank | XP.
+            local nChk = countChecked(S.view)
+            local railW = GRID_W
             local leftW = 280
             pcall(function()
                 local ww = ImGui.GetWindowWidth() or 0
                 if ww > railW + 40 then leftW = ww - railW - 28 end
             end)
-            if ImGui.BeginChild('taBagsFootL', leftW, SLOT_H, false) then
+            if ImGui.BeginChild('taBagsFootL', leftW, GRID_H, false) then
                 if ImGui.SmallButton('All##vfInvChkAll') then
                     local n = 0
-                    for _, row in ipairs(rows) do
+                    for _, row in ipairs(S.rows) do
                         -- VF: All skips locked.
-                        if matches(row) and not row.empty and (row.where or view) == view
-                            and not isLockedRow(row) then
+                        -- VF: All skips locked. Augs rows live in bags/bank, not view='augs'.
+                        if matches(row) and not row.empty and not isLockedRow(row)
+                            and (S.view == 'augs'
+                                and (row.where == 'bags' or row.where == 'bank')
+                                or (row.where or S.view) == S.view) then
                             setChecked(rowWhere(row), row.name, true)
                             n = n + 1
                         end
                     end
-                    dbg('All checked %d rows view=%s', n, tostring(view))
+                    dbg('All checked %d rows view=%s', n, tostring(S.view))
                 end
                 if ImGui.IsItemHovered() then setTip('Select All') end
                 ImGui.SameLine()
@@ -2537,24 +3024,25 @@ local function create(opts)
                     if ImGui.IsItemHovered() then setTip(tip) end
                     ImGui.SameLine()
                 end
-                local sellEn = canSell and view == 'bags'
+                local sellEn = canSell and S.view == 'bags'
                 massBtn('Sell', 'masssell', sellEn,
                     canSell and (nChk > 0 and 'Sell checked' or 'Check items first')
                         or 'Open a vendor')
-                local canDelete = canMutate and (view == 'bags' or (view == 'bank' and bankOpen()))
+                local canDelete = canMutate and (S.view == 'bags' or S.view == 'bank')
                 massBtn('Delete', 'massdelete', canDelete,
                     canMutate
-                        and (view == 'bank' and not bankOpen() and 'Open bank first'
-                            or (nChk > 0 and 'Destroy checked' or 'Check items first'))
+                        and (nChk > 0 and 'Destroy checked' or 'Check items first')
                         or 'Close vendor first')
                 massBtn('Move', 'massmove', canMutate,
                     canMutate
                         and (nChk > 0
-                            and (view == 'bags' and 'Move to bank' or 'Move to bags')
+                            and (S.view == 'bags' and 'Move to bank'
+                                or S.view == 'augs' and 'Move checked from bank to bags'
+                                or 'Move to bags')
                             or 'Check items first')
                         or 'Close vendor first')
                 -- VF: Turn-In = handinsingle plow until each checked name is gone.
-                if view == 'bags' then
+                if S.view == 'bags' then
                     local hasTarget = (mq.TLO.Target.ID() or 0) > 0
                     local tip = 'Target an NPC first'
                     if hasTarget and nChk > 0 then
@@ -2576,14 +3064,59 @@ local function create(opts)
             end
             ImGui.EndChild()
             ImGui.SameLine()
-            drawDropBox(SLOT_W, SLOT_H)
-            ImGui.SameLine()
-            drawPowerSourceBox(SLOT_W, SLOT_H)
+            local function sqLabel(label)
+                local hasCur = (mq.TLO.Cursor.ID() or 0) > 0
+                if hasCur then
+                    local icon = 0
+                    pcall(function() icon = tonumber(mq.TLO.Cursor.Icon()) or 0 end)
+                    pcall(function() ImGui.SetCursorPos((SQ - ICON_SIZE) * 0.5, 4) end)
+                    drawIcon(icon)
+                    pcall(function() ImGui.SetCursorPos(4, SQ - 16) end)
+                    ImGui.TextColored(GOOD[1], GOOD[2], GOOD[3], GOOD[4], label)
+                else
+                    local tw = 28
+                    pcall(function()
+                        local w = ImGui.CalcTextSize(label)
+                        if type(w) == 'number' then tw = w elseif w and w.x then tw = w.x end
+                    end)
+                    pcall(function() ImGui.SetCursorPos(math.max(2, (SQ - tw) * 0.5), (SQ - 14) * 0.5) end)
+                    ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], label)
+                end
+            end
+            local psTip = 'Triune Power Source\nClick to place or pick.'
+            pcall(function()
+                local info = powerSrc.info()
+                local psName = info.name or ''
+                if psName ~= '' and psName ~= 'NULL' and not info.empty then
+                    psTip = psName
+                    if info.pct ~= nil then
+                        psTip = psTip .. string.format('\n%.2f%% grown', info.pct)
+                    end
+                    psTip = psTip .. '\nClick to swap'
+                end
+            end)
+            if ImGui.BeginChild('taBagsFootR', GRID_W, SQ, false, slotChildFlags()) then
+                drawSq('vfSqInv', 'INV', function() clickNow('dropbags') end,
+                    'Queue cursor into bags. Empty click opens Bags.', function() sqLabel('INV') end)
+                ImGui.SameLine(0, GAP)
+                drawSq('vfSqBank', 'Bank', function() clickNow('dropbank') end,
+                    'Queue cursor into bank. Empty click opens the Bank tab.', function() sqLabel('Bank') end)
+                ImGui.SameLine(0, GAP)
+                drawSq('vfSqXp', 'XP', function()
+                    mq.cmd('/nomodkey /itemnotify powersource leftmouseup')
+                    pcall(powerSrc.refresh)
+                    S.lastScan = 0
+                    S.status = 'power source'
+                end, psTip, sqXp)
+            end
+            ImGui.EndChild()
+
+            end
 
             ImGui.Dummy(0, 4)
             if brand.drawSolidRule then brand.drawSolidRule() end
-            if status ~= '' then
-                ImGui.TextColored(BRAND[1], BRAND[2], BRAND[3], BRAND[4], status)
+            if S.status ~= '' then
+                ImGui.TextColored(BRAND[1], BRAND[2], BRAND[3], BRAND[4], S.status)
                 ImGui.SameLine()
             end
             local btnW = 80
@@ -2592,16 +3125,16 @@ local function create(opts)
             if ww < 1 then ww = 560 end
             ImGui.SetCursorPosX(math.max(12, ww - 12 - btnW))
             if ImGui.Button('Close##vfInvClose', btnW, 24) then
-                openGUI = false
+                S.openGUI = false
             end
 
             -- VF: Turn-In confirm (plow empties stacks).
-            if turninConfirm then
+            if S.turninConfirm then
                 pcall(function() ImGui.OpenPopup('Turn-In###vfInvTurnInConfirm') end)
             end
             pcall(function() ImGui.SetNextWindowSize(420, 280, ImGuiCond.Appearing) end)
             if ImGui.BeginPopupModal('Turn-In###vfInvTurnInConfirm') then
-                local conf = turninConfirm
+                local conf = S.turninConfirm
                 local names = conf and conf.names or {}
                 local tname = conf and conf.target or 'target'
                 ImGui.TextWrapped(
@@ -2626,7 +3159,7 @@ local function create(opts)
                 end
                 ImGui.SameLine()
                 if ImGui.Button('Cancel##vfInvTurnInCancel', 80, 24) then
-                    turninConfirm = nil
+                    S.turninConfirm = nil
                     ImGui.CloseCurrentPopup()
                 end
                 ImGui.EndPopup()
@@ -2635,21 +3168,30 @@ local function create(opts)
         ImGui.End()
 
         -- VF: Help window from header ?.
-        if showHelp then
+        if S.showHelp then
             ImGui.SetNextWindowSize(420, 480, ImGuiCond.FirstUseEver)
             local helpOpen = true
             local helpShown
             helpOpen, helpShown = ImGui.Begin(
                 brand.windowTitle('Inventory Help') .. '###vfInvHelpWin', helpOpen)
             if helpShown == nil then helpShown = helpOpen ~= false end
-            if helpOpen == false then showHelp = false end
-            if helpShown and showHelp then
+            if helpOpen == false then S.showHelp = false end
+            if helpShown and S.showHelp then
                 ImGui.TextWrapped(
                     'Bags are the current inventory of the character.')
                 ImGui.Dummy(0, 4)
                 ImGui.TextWrapped(
                     'Bank is the contents of your bank. This may change depending on the server. '
-                    .. 'For actions between the bank and inventory, the bank window needs to be open.')
+                    .. 'The window opens for a move, pick, or delete, then we close it. '
+                    .. 'Open Bank is only if you want to look at it.')
+                ImGui.Dummy(0, 6)
+                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Augs')
+                ImGui.TextWrapped(
+                    'Kera / Seru / Zeb shopping. Goal is one legendary per flavor, including equipped. '
+                    .. 'W is gear. Pull needed brings unfinished augs from bank into bags. '
+                    .. 'Push to bank sends this family\'s bag augs back. Combine uses pack 10. '
+                    .. 'Four identical augs use the Gnomish Combinerator; 16 base uses the XL. '
+                    .. 'We empty pack 10, seat the right combiner, bank the result, restore the bag.')
                 ImGui.Dummy(0, 6)
                 ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Items')
                 ImGui.BulletText('Left click picks up. Ctrl+click takes one from a stack.')
@@ -2671,28 +3213,195 @@ local function create(opts)
                 ImGui.BulletText('Runs until depleted. Wrong NPC will still take the items.')
                 ImGui.Dummy(0, 4)
                 ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Slots')
-                ImGui.BulletText('AutoInv puts the cursor item away.')
-                ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Power Source')
-                ImGui.TextWrapped(
-                    'Triune-only leveling slot. Growth % comes from the item (cached for the mini bar). '
-                    .. 'Swap them here instead of digging bags.')
-                ImGui.BulletText('Click with an item on the cursor to place it.')
-                ImGui.BulletText('Click a filled slot to pick it up.')
+                ImGui.BulletText('INV queues a drop into bags. Bank queues a drop into the bank.')
+                ImGui.BulletText('The bank window opens only for a transfer, then we close it.')
+                ImGui.BulletText('Move / Pull / Push queue every name, including one item.')
+                ImGui.BulletText('XP is the Power Source: icon if filled, growth % if empty. Click to swap.')
                 ImGui.Dummy(0, 4)
                 ImGui.TextColored(MUTED[1], MUTED[2], MUTED[3], MUTED[4], 'Other')
                 ImGui.BulletText('Scribe All learns from bags.')
                 ImGui.BulletText('Locks save per character.')
-                ImGui.Dummy(0, 8)
-                hideTooltips = ImGui.Checkbox('Hide tooltips##vfInvHideTips', hideTooltips)
                 ImGui.Dummy(0, 6)
                 if ImGui.Button('Close##vfInvHelpClose', 80, 24) then
-                    showHelp = false
+                    S.showHelp = false
                 end
             end
             ImGui.End()
         end
 
         popTheme()
+    end
+
+    -- VF: Standalone overlay. Logo + brand, stretch, bag (/vf inv), fill% green→red, power source %.
+    function app.drawHud()
+        local hudCol, hudVar = 0, 0
+        local begun = false
+        local function popHud()
+            if hudVar > 0 then pcall(ImGui.PopStyleVar, hudVar) end
+            if hudCol > 0 then pcall(ImGui.PopStyleColor, hudCol) end
+            hudCol, hudVar = 0, 0
+        end
+        local ok = pcall(function()
+            local Col = ImGuiCol or _G.ImGuiCol
+            local SV = ImGuiStyleVar or _G.ImGuiStyleVar
+            if Col then
+                if pcall(ImGui.PushStyleColor, Col.WindowBg, 0.031, 0.016, 0.055, 0.97) then hudCol = hudCol + 1 end
+                if pcall(ImGui.PushStyleColor, Col.Border, 0.275, 0.125, 0.490, 1) then hudCol = hudCol + 1 end
+                if pcall(ImGui.PushStyleColor, Col.Text, 0.910, 0.863, 0.784, 1) then hudCol = hudCol + 1 end
+                if pcall(ImGui.PushStyleColor, Col.TextDisabled, 0.500, 0.400, 0.620, 1) then hudCol = hudCol + 1 end
+                if pcall(ImGui.PushStyleColor, Col.Button, 0.078, 0.035, 0.137, 1) then hudCol = hudCol + 1 end
+                if pcall(ImGui.PushStyleColor, Col.ButtonHovered, 0.710, 0.420, 1.000, 0.35) then hudCol = hudCol + 1 end
+            end
+            if SV then
+                if pcall(ImGui.PushStyleVar, SV.WindowRounding, 7) then hudVar = hudVar + 1 end
+                local ImVec2Type = _G.ImVec2 or ImVec2
+                local function pushVec(id, x, y)
+                    local okV
+                    if type(ImVec2Type) == 'function' then
+                        okV = pcall(ImGui.PushStyleVar, id, ImVec2Type(x, y))
+                    else
+                        okV = pcall(ImGui.PushStyleVar, id, x, y)
+                    end
+                    if okV then hudVar = hudVar + 1 end
+                end
+                if SV.WindowPadding then pushVec(SV.WindowPadding, 10, 6) end
+                if SV.ItemSpacing then pushVec(SV.ItemSpacing, 6, 4) end
+                if SV.FramePadding then pushVec(SV.FramePadding, 4, 2) end
+            end
+            ImGui.SetNextWindowSize(520, 36, ImGuiCond.FirstUseEver)
+            pcall(function()
+                ImGui.SetNextWindowSizeConstraints(300, 36, 1200, 36)
+            end)
+            local flags = 0
+            local F = ImGuiWindowFlags
+            if F and F.NoTitleBar and F.NoCollapse then
+                flags = bitbor(F.NoTitleBar, F.NoCollapse)
+                if F.NoScrollbar then flags = bitbor(flags, F.NoScrollbar) end
+            end
+            local opened, shown = ImGui.Begin('###vfInvHud', true, flags)
+            begun = true
+            if shown == nil then shown = opened ~= false end
+            if not shown then return end
+
+            if brand.drawHeaderWash then brand.drawHeaderWash() end
+            brand.drawHeader()
+
+            local now = os.clock()
+            if (now - (S.hudFillAt or 0)) > 0.5 then
+                S.hudFillAt = now
+                local used, free = 0, 0
+                pcall(function()
+                    for pack = 1, packCount() do
+                        local bag
+                        pcall(function() bag = mq.TLO.Me.Inventory('pack' .. pack) end)
+                        if bag and bag() then
+                            local size = tonumber(bag.Container()) or 0
+                            if size > 0 then
+                                for slot = 1, size do
+                                    local item
+                                    pcall(function() item = bag.Item(slot) end)
+                                    if item and item() then
+                                        used = used + 1
+                                    else
+                                        free = free + 1
+                                    end
+                                end
+                            else
+                                used = used + 1
+                            end
+                        end
+                    end
+                end)
+                local tot = used + free
+                S.hudFillUsed, S.hudFillFree = used, free
+                S.hudFillPct = (tot > 0) and ((used / tot) * 100) or 0
+            end
+
+            local invPct = tonumber(S.hudFillPct) or 0
+            local invTxt = string.format('%d%%', math.floor(invPct + 0.5))
+            local info = powerSrc.info()
+            local psTxt = '--'
+            if info.pct ~= nil then
+                psTxt = string.format('%d%%', math.floor(info.pct + 0.5))
+            end
+            local psCol = powerSrc.tierColor()
+            local t = invPct / 100
+            if t < 0 then t = 0 elseif t > 1 then t = 1 end
+            local ir = 0.37 + (0.90 - 0.37) * t
+            local ig = 0.88 + (0.22 - 0.88) * t
+            local ib = 0.64 + (0.25 - 0.64) * t
+
+            local invW, psW = 28, 28
+            pcall(function()
+                local w = ImGui.CalcTextSize(invTxt)
+                if type(w) == 'number' then invW = w elseif w and w.x then invW = w.x end
+                w = ImGui.CalcTextSize(psTxt)
+                if type(w) == 'number' then psW = w elseif w and w.x then psW = w.x end
+            end)
+            local bagSz, gap, pad = 20, 8, 10
+            local rightW = bagSz + gap + invW + gap + psW
+            local ww = ImGui.GetWindowWidth() or 0
+            ImGui.SameLine()
+            pcall(function()
+                local cx = ImGui.GetCursorPosX() or 0
+                local target = ww - pad - rightW
+                if target > cx + 4 then ImGui.SetCursorPosX(target) end
+            end)
+
+            local bagClicked = false
+            local usedIcon = false
+            pcall(function()
+                if not S.hudBagTried then
+                    S.hudBagTried = true
+                    local dir = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
+                    local paths = { dir .. '../vf-bag.png', dir .. 'vf-bag.png' }
+                    for i = 1, #paths do
+                        local tok, tex = pcall(mq.CreateTexture, paths[i])
+                        if tok and tex then
+                            S.hudBagTex = tex
+                            break
+                        end
+                    end
+                end
+                local tex = S.hudBagTex
+                local ImVec2Type = _G.ImVec2 or ImVec2 or (mq.imgui and mq.imgui.ImVec2)
+                if tex and tex.GetTextureID and ImVec2Type then
+                    usedIcon = true
+                    ImGui.Image(tex:GetTextureID(), ImVec2Type(bagSz, bagSz))
+                    if ImGui.IsItemClicked() then bagClicked = true end
+                end
+            end)
+            if not usedIcon then
+                if ImGui.SmallButton('Bag##vfInvHudBag') then bagClicked = true end
+            end
+            if bagClicked then setOpen(not S.openGUI) end
+            if ImGui.IsItemHovered() then
+                pcall(ImGui.SetTooltip, '/vf inv')
+            end
+
+            ImGui.SameLine(0, gap)
+            ImGui.TextColored(ir, ig, ib, 1, invTxt)
+            if ImGui.IsItemHovered() then
+                pcall(ImGui.SetTooltip, string.format('%d used / %d bag slots', S.hudFillUsed or 0,
+                    (S.hudFillUsed or 0) + (S.hudFillFree or 0)))
+            end
+
+            ImGui.SameLine(0, gap)
+            ImGui.TextColored(psCol[1], psCol[2], psCol[3], psCol[4], psTxt)
+            if ImGui.IsItemHovered() then
+                local psName = info.name or ''
+                local tip = 'Triune Power Source'
+                if psName ~= '' and not info.empty then
+                    tip = psName
+                    if info.pct ~= nil then
+                        tip = tip .. string.format('\n%.2f%% grown', info.pct)
+                    end
+                end
+                pcall(ImGui.SetTooltip, (tip:gsub('%%', '%%%%')))
+            end
+        end)
+        if begun then pcall(ImGui.End) end
+        popHud()
     end
 
     return app

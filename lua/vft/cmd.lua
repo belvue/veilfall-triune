@@ -105,8 +105,8 @@ function M.install(runtime, api)
                 print('\ag[VF]\ax paused.')
             end
         elseif cmd == 'status' then
-            print(string.format('\ag[VF]\ax mode: %s, burn: %s, boost: %s',
-                ctrl.mode, ctrl.burn and 'ON' or 'OFF', ctrl.boost and 'ON' or 'OFF'))
+            print(string.format('\ag[VF]\ax mode: %s, burn: %s',
+                ctrl.mode, ctrl.burn and 'ON' or 'OFF'))
         elseif cmd == 'aggro' then
             -- VF: reads which aggro signal fires, per mob. "on me" drives retargeting
             -- VF: and add detection, so when it looks wrong this is how you see why.
@@ -135,19 +135,6 @@ function M.install(runtime, api)
                 ctrl.burn = not ctrl.burn
                 if runtime.resetBurnMultiline then runtime.resetBurnMultiline() end
                 print(string.format('\ag[VF]\ax Burn mode %s.', ctrl.burn and 'ENABLED!' or 'DISABLED.'))
-            end
-        elseif cmd == 'boost' or cmd == 'booston' or cmd == 'boostoff' or cmd == 'boosttoggle' then
-            -- VF: Boost stub — session flag only until combat wiring lands.
-            local sub = args[2] and string.lower(args[2]) or ''
-            if sub == 'on' or sub == '1' or cmd == 'booston' then
-                ctrl.boost = true
-                print('\ag[VF]\ax Boost ON (stub).')
-            elseif sub == 'off' or sub == '0' or cmd == 'boostoff' then
-                ctrl.boost = false
-                print('\ag[VF]\ax Boost OFF (stub).')
-            else
-                ctrl.boost = not ctrl.boost
-                print(string.format('\ag[VF]\ax Boost %s (stub).', ctrl.boost and 'ON' or 'OFF'))
             end
         elseif cmd == 'burndiag' then
             if runtime.burnDiag then runtime.burnDiag() else print('\ar[VF]\ax burndiag missing.') end
@@ -240,7 +227,6 @@ function M.install(runtime, api)
             print('  \ag' .. p .. ' prebuff | buffs\ax - Refresh missing self buffs without starting combat')
             print('  \ag' .. p .. ' pause | stop\ax - Pause (you walk, press attack)')
             print('  \ag' .. p .. ' burn [on|off|diag]\ax - Session burn; diag = why burn_only rows skip')
-            print('  \ag' .. p .. ' boost [on|off]\ax - Session boost stub (no combat wiring yet)')
             print('  \ag' .. p .. ' prunegates\ax - Drop spell library rows not in your spellbook')
             print('  \ag' .. p .. ' debug\ax - Toggle live combat debug telemetry in chat')
             print('  \ag' .. p .. ' aadiag\ax - AA queue, banked points, and MQ2AASpend status')
@@ -259,7 +245,7 @@ function M.install(runtime, api)
             print('  \ag' .. p .. ' reloadloadout\ax - Re-read char loadout from disk (Manager Save does this)')
             print('  \ag' .. p .. ' help | h | ?\ax - Print slash command summary')
             print('  \ag' .. p .. ' spellbook | book\ax - Toggle spellbook browser')
-            print('  \ag/vfinv\ax - Toggle inventory (/lua run vft/inv)')
+            print('  \ag/vfinv\ax - Toggle inventory (/lua run vfi)')
             print('  \ag/vfvault\ax - /say #vault_merchant')
             print('  \ag' .. p .. ' inv | bags | inventory\ax - same as /vfinv')
             print('  \ag' .. p .. ' clearcursor | autoinv\ax - Clear items from cursor')

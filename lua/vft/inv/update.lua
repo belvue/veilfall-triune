@@ -1,5 +1,6 @@
--- VF: overlay GitHub main onto mq.luaDir. Manager Settings Check/Update (suite).
--- VF: Check fetches lua/vft/version.txt (0.N.N). Never on draw. README is fallback.
+-- VF: inv-only overlay. Copies vfi.lua + vft/inv/** + inv satellite modules from the same GitHub zip.
+-- VF: Check fetches lua/vft/inv/version.txt. No README fallback (that is suite).
+-- VF: Overlay copy list must match vfi.lua ensureInvTree.
 
 local mq = require('mq')
 
@@ -10,18 +11,18 @@ M.BRANCH = 'main'
 M.release = ''
 M.note = ''
 M.err = ''
+M.state = true
 
 local job = nil
 local currentCache, currentAt = '', -1
-local VER_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/version.txt'
-local README_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md'
+local VER_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt'
 
 local function luaDir()
     local dir = ''
     pcall(function() dir = tostring(mq.luaDir or '') end)
     if dir == '' or dir == 'NULL' then
         dir = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
-        dir = dir:gsub('[/\\]vft[/\\]?$', '')
+        dir = dir:gsub('[/\\]vft[/\\]inv[/\\]?$', '')
     end
     return dir:gsub('/', '\\'):gsub('\\+$', '')
 end
@@ -70,10 +71,8 @@ function M.current()
     local now = os.clock()
     if (now - currentAt) < 2 then return currentCache end
     local dir = luaDir()
-    currentCache = M.parseVer(readFile(dir .. '\\vft\\version.txt'))
-    if currentCache == '' then
-        currentCache = M.parseVer(readFile(dir .. '\\vft\\.rev'))
-    end
+    currentCache = M.parseVer(readFile(dir .. '\\vft\\inv\\version.txt'))
+    if currentCache == '' then currentCache = '0.0.0' end
     currentAt = now
     return currentCache
 end
@@ -82,10 +81,15 @@ function M.busy()
     return job ~= nil
 end
 
+function M.install()
+    M.state = true
+end
+
 local PS = [=[
 param(
     [Parameter(Mandatory = $true)][string]$LuaDir,
-    [Parameter(Mandatory = $true)][string]$OutFile
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -100,7 +104,7 @@ $branch = 'main'
 $token = $env:VF_GITHUB_TOKEN
 $headers = @('-sL', '-H', 'User-Agent: VF-Update')
 if ($token) { $headers += @('-H', "Authorization: Bearer $token") }
-$tmp = Join-Path $env:TEMP ('vfup-' + [guid]::NewGuid().ToString('n'))
+$tmp = Join-Path $env:TEMP ('vfiup-' + [guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 function Get-Ver([string]$url) {
     $f = Join-Path $tmp 'ver.txt'
@@ -124,13 +128,13 @@ function Cmp-Ver([string]$a, [string]$b) {
     return 0
 }
 try {
-    $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/version.txt"
-    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md" }
-    $verFile = Join-Path $LuaDir 'vft\version.txt'
-    $old = ''
+    $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt"
+    if (-not $rel) { throw 'inv version missing' }
+    $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
+    $old = '0.0.0'
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
-    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] }
-    if ($rel -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
+    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
+    if (-not $Force -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
     & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
@@ -140,29 +144,30 @@ try {
     $srcRoot = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'veilfall-triune-*' } | Select-Object -First 1
     if (-not $srcRoot) { throw 'zip layout' }
     $luaSrc = Join-Path $srcRoot.FullName 'lua'
-    if (-not (Test-Path (Join-Path $luaSrc 'vf.lua'))) { throw 'zip has no lua/vf.lua' }
-    foreach ($name in @('vf.lua', 'vfi.lua')) {
-        $from = Join-Path $luaSrc $name
-        if (Test-Path $from) { Copy-Item $from (Join-Path $LuaDir $name) -Force }
+    $vfi = Join-Path $luaSrc 'vfi.lua'
+    if (-not (Test-Path $vfi)) { throw 'zip has no lua/vfi.lua' }
+    Copy-Item $vfi (Join-Path $LuaDir 'vfi.lua') -Force
+    $invSrc = Join-Path $luaSrc 'vft\inv'
+    $invDst = Join-Path $LuaDir 'vft\inv'
+    if (-not (Test-Path $invSrc)) { throw 'zip has no lua/vft/inv' }
+    New-Item -ItemType Directory -Path $invDst -Force | Out-Null
+    Get-ChildItem $invSrc -Recurse -File | ForEach-Object {
+        $relPath = $_.FullName.Substring($invSrc.Length).TrimStart('\', '/')
+        if ($relPath -match '^[\\/]?config[\\/]' -and $_.Extension -match '\.(ini|old|tmp)$') { return }
+        if ($_.Name -eq '.rev') { return }
+        $dest = Join-Path $invDst $relPath
+        $parent = Split-Path $dest
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        Copy-Item $_.FullName $dest -Force
     }
-    $vftSrc = Join-Path $luaSrc 'vft'
-    $vftDst = Join-Path $LuaDir 'vft'
-    if (Test-Path $vftSrc) {
-        New-Item -ItemType Directory -Path $vftDst -Force | Out-Null
-        Get-ChildItem $vftSrc -Recurse -File | ForEach-Object {
-            $relPath = $_.FullName.Substring($vftSrc.Length).TrimStart('\', '/')
-            if ($relPath -match '^[\\/]?config[\\/]' -and $_.Extension -match '\.(ini|old|tmp)$') { return }
-            if ($_.Name -eq '.rev') { return }
-            $dest = Join-Path $vftDst $relPath
+    foreach ($relName in @('vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
+        $from = Join-Path $luaSrc $relName
+        if (Test-Path $from) {
+            $dest = Join-Path $LuaDir $relName
             $parent = Split-Path $dest
             if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-            Copy-Item $_.FullName $dest -Force
+            Copy-Item $from $dest -Force
         }
-    }
-    if ($rel -and -not (Test-Path $verFile)) {
-        $verDir = Split-Path $verFile
-        if (-not (Test-Path $verDir)) { New-Item -ItemType Directory -Path $verDir -Force | Out-Null }
-        Set-Content -Path $verFile -Value $rel -Encoding ascii -NoNewline
     }
     $got = $rel
     if (Test-Path $verFile) { $got = (Get-Content $verFile -Raw).Trim() }
@@ -176,25 +181,24 @@ try {
 }
 ]=]
 
-local function spawnCurlCheck(url)
-    local out = tempDir() .. '\\vf-ver.txt'
+local function spawnCurlCheck()
+    local out = tempDir() .. '\\vfi-ver.txt'
     pcall(os.remove, out)
-    job = { mode = 'check', out = out, at = os.clock(), limit = 12, url = url }
+    job = { mode = 'check', out = out, at = os.clock(), limit = 12 }
     M.note = 'checking…'
     M.err = ''
-    -- VF: Lua os.execute is already cmd /c. start "" returns now; curl is the click.
     os.execute(string.format(
         'start "" /min curl.exe -sL --max-time 10 -A VF-Update -o "%s" "%s"',
         out:gsub('"', ''),
-        url))
+        VER_URL))
 end
 
-local function startUpdateJob()
+local function startUpdateJob(force)
     if job then return false end
     local dest = luaDir()
     local tmp = tempDir()
-    local ps1 = tmp .. '\\vfup.ps1'
-    local out = tmp .. '\\vfup.out'
+    local ps1 = tmp .. '\\vfiup.ps1'
+    local out = tmp .. '\\vfiup.out'
     pcall(os.remove, out)
     local f, e = io.open(ps1, 'w')
     if not f then
@@ -207,22 +211,22 @@ local function startUpdateJob()
     M.err = ''
     M.note = 'updating…'
     os.execute(string.format(
-        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s"',
+        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s"%s',
         ps1:gsub('"', ''),
         dest:gsub('"', ''),
-        out:gsub('"', '')))
+        out:gsub('"', ''),
+        force and ' -Force' or ''))
     return true
 end
 
-function M.reloadVf()
+function M.reloadVfi()
     pcall(function()
-        mq.cmd('/multiline ; /vf pause; /lua stop vf; /timed 10 /lua run vf')
+        mq.cmd('/multiline ; /lua stop vfi; /lua stop vft/inv; /timed 10 /lua run vfi')
     end)
 end
 
 local function finishCheck()
     local body = job and readFile(job.out) or ''
-    local tryReadme = job and job.url ~= README_URL
     job = nil
     local ver = M.parseVer(body)
     if ver ~= '' then
@@ -231,12 +235,8 @@ local function finishCheck()
         M.note = (M.cmpVer(M.current(), ver) >= 0) and 'up to date' or ''
         return
     end
-    if tryReadme then
-        spawnCurlCheck(README_URL)
-        return
-    end
     M.note = ''
-    M.err = (body == '') and 'check timed out' or 'could not read GitHub version'
+    M.err = (body == '') and 'check timed out' or 'could not read GitHub inv version'
 end
 
 local function takeVer(result)
@@ -252,20 +252,16 @@ local function finishUpdate(result)
     currentAt = -1
     local ver = takeVer(result)
     if result:find('^ok up%-to%-date') then
-        if ver ~= '' then
-            M.release = ver
-        end
+        if ver ~= '' then M.release = ver end
         M.note = 'up to date'
         M.err = ''
         return
     end
     if result:find('^ok updated') then
-        if ver ~= '' then
-            M.release = ver
-        end
+        if ver ~= '' then M.release = ver end
         M.note = ''
         M.err = ''
-        M.reloadVf()
+        M.reloadVfi()
         return
     end
     M.note = ''
@@ -305,7 +301,7 @@ end
 
 function M.startCheck()
     if job then return end
-    spawnCurlCheck(VER_URL)
+    spawnCurlCheck()
 end
 
 function M.startUpdate()
@@ -313,28 +309,59 @@ function M.startUpdate()
     startUpdateJob()
 end
 
-function M.runCli()
-    if not startUpdateJob() then
-        print('\ag[VF]\ax \ar' .. (M.err ~= '' and M.err or 'update failed'))
-        return
+function M.runCli(opts)
+    opts = opts or {}
+    if not startUpdateJob(opts.force) then
+        print('\ag[VF:Inv]\ax \ar' .. (M.err ~= '' and M.err or 'update failed'))
+        return false
     end
-    print('\ag[VF]\ax overlaying ' .. M.REPO .. '@' .. M.BRANCH)
+    print('\ag[VF:Inv]\ax overlaying ' .. M.REPO .. '@' .. M.BRANCH)
     while job do
-        if mq.canDelay and mq.canDelay() then
-            mq.delay(200)
-        end
+        mq.delay(200)
         M.tick()
     end
     if M.err ~= '' then
-        print('\ag[VF]\ax \ar' .. M.err)
-        return
+        print('\ag[VF:Inv]\ax \ar' .. M.err)
+        return false
     end
     if M.note == 'up to date' then
-        print('\ag[VF]\ax up to date ' .. M.display(M.release))
-        return
+        print('\ag[VF:Inv]\ax up to date ' .. M.display(M.release))
+        return true
     end
-    print('\ag[VF]\ax updated ' .. M.display(M.release))
-    M.reloadVf()
+    print('\ag[VF:Inv]\ax updated ' .. M.display(M.release))
+    return true
+end
+
+function M.drawPanel()
+    local ImGui = require('ImGui')
+    local rel = M.display(M.release)
+    local cur = M.display(M.current())
+    local busy = M.busy()
+    ImGui.Text('GitHub (inventory)')
+    ImGui.Text('Release: ' .. (rel ~= '' and rel or (M.note == 'checking…' and 'checking…' or '—')))
+    ImGui.Text('Current: ' .. (cur ~= '' and cur or '—'))
+    if busy then
+        if M.note ~= '' then ImGui.Text(M.note) end
+    else
+        if ImGui.Button('Check##vfInvGitCheck', 88, 24) then
+            M.startCheck()
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Fetch lua/vft/inv/version.txt from GitHub. A few bytes, no zip.')
+        end
+        ImGui.SameLine(0, 8)
+        if ImGui.Button('Update##vfInvGitUpdate', 88, 24) then
+            M.startUpdate()
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('Overlay vfi.lua, vft/inv, and inv satellite modules from GitHub main.\nDoes not write vf.lua.')
+        end
+    end
+    if M.err ~= '' then
+        ImGui.TextColored(0.90, 0.25, 0.30, 1, M.err)
+    elseif M.note ~= '' and not busy then
+        ImGui.Text(M.note)
+    end
 end
 
 return M

@@ -1962,9 +1962,10 @@ local function applyEntry(e)
     if type(e.control) == 'table' then
         for k, v in pairs(e.control) do ctrl[k] = v end
         sanitizeModeConfig()
-        -- VF: Burn/Boost are session-only (Mini / /vf burn|boost); never restore from disk.
+        -- VF: Burn is session-only (Mini / /vf burn); never restore from disk.
         ctrl.burn = false
-        ctrl.boost = false
+        -- VF: Boost stub is gone; drop the old session key if a loadout still has it.
+        ctrl.boost = nil
         -- VF: old-dev: pre-3.6 use_melee/use_ranged -> combat_style.
         if not e.control.combat_style then
             ctrl.combat_style = e.control.use_ranged and 'Ranged' or 'Melee'
@@ -2089,13 +2090,12 @@ end
 
 local function saveLoadout(silent)
     if not myName then return end
-    -- VF: Burn/Boost are session-only ? never persist true to disk.
-    local wasBurn, wasBoost = ctrl.burn, ctrl.boost
+    -- VF: Burn is session-only — never persist true to disk.
+    local wasBurn = ctrl.burn
     ctrl.burn = false
-    ctrl.boost = false
+    ctrl.boost = nil
     local e = collectEntry()
     ctrl.burn = wasBurn
-    ctrl.boost = wasBoost
     pcall(function() e = require('vft.mgr.schema').migrateEntry(e) end)
     e.ignore = runtime.ignoreList
     e.pull = runtime.pullList
@@ -2474,10 +2474,10 @@ local function loadoutSig()
     return table.concat(p, '|')
 end
 
--- VF: Manager wrote disk; re-read without dropping session burn/boost/running.
+-- VF: Manager wrote disk; re-read without dropping session burn/running.
 function runtime.reloadLoadout(silent)
     if not myName then return false end
-    local wasBurn, wasBoost, wasRunning = ctrl.burn, ctrl.boost, ctrl.running
+    local wasBurn, wasRunning = ctrl.burn, ctrl.running
     loadAll()
     local e = runtime.allData[myName]
     if type(e) ~= 'table' then
@@ -2486,7 +2486,7 @@ function runtime.reloadLoadout(silent)
     end
     applyEntry(e)
     ctrl.burn = wasBurn
-    ctrl.boost = wasBoost
+    ctrl.boost = nil
     ctrl.running = wasRunning
     runtime.lastSig = loadoutSig()
     runtime.autoDirty = false
@@ -2761,7 +2761,7 @@ end
 function UI.drawSlimBagButton()
     UI.drawSlimTexButton('bagTexTried', 'bagTex', 'vf-bag.png', 'Bag##slimBags', function()
         if toggleVfInv then toggleVfInv() end
-    end, 'Inv. /vf inv (/lua run vft/inv)')
+    end, 'Inv. /vf inv (/lua run vfi)')
 end
 
 function UI.drawSlimGearButton()
@@ -2792,60 +2792,6 @@ function UI.drawSlimBurnButton()
         end,
         'Burn (session). Mini or /vf burn. Instant burn_only ? /multiline every ~10 ticks; cast-time burn rows one-fire. Clears when CombatState leaves COMBAT.',
         tint)
-end
-
--- VF: Boost stub ? lightning bolt; /vf boost. No combat behavior yet.
-function UI.drawSlimBoostButton()
-    local size = 20
-    local on = not not ctrl.boost
-    local cr, cg, cb, ca
-    if on then
-        local pulse = (math.sin(os.clock() * 8.0) + 1.0) * 0.5
-        cr, cg, cb, ca = 0.85, 0.55 + (0.35 * pulse), 1.0, 1.0
-    else
-        cr, cg, cb, ca = 0.54, 0.44, 0.53, 0.85
-    end
-    local clicked = false
-    local drew = false
-    pcall(function()
-        local dl = ImGui.GetWindowDrawList()
-        local ImVec2Type = _G.ImVec2 or ImVec2 or (mq.imgui and mq.imgui.ImVec2)
-        if not (dl and ImVec2Type) then return end
-        local p = ImGui.GetCursorScreenPosVec()
-        if not p then return end
-        ImGui.InvisibleButton('##slimBoost', ImVec2Type(size, size))
-        if ImGui.IsItemClicked() then clicked = true end
-        local col = IM_COL32(math.floor(cr * 255), math.floor(cg * 255), math.floor(cb * 255), math.floor(ca * 255))
-        local x, y, s = p.x, p.y, size
-        -- VF: simple bolt in brand purple.
-        if dl.AddTriangleFilled then
-            dl:AddTriangleFilled(
-                ImVec2Type(x + s * 0.58, y + s * 0.08),
-                ImVec2Type(x + s * 0.22, y + s * 0.52),
-                ImVec2Type(x + s * 0.48, y + s * 0.52), col)
-            dl:AddTriangleFilled(
-                ImVec2Type(x + s * 0.42, y + s * 0.48),
-                ImVec2Type(x + s * 0.36, y + s * 0.92),
-                ImVec2Type(x + s * 0.78, y + s * 0.40), col)
-        end
-        drew = true
-    end)
-    if not drew then
-        local Col = ImGuiCol or _G.ImGuiCol or (mq.imgui and mq.imgui.Col)
-        local pushed = 0
-        if Col and Col.Text then
-            if pcall(ImGui.PushStyleColor, Col.Text, cr, cg, cb, ca) then pushed = pushed + 1 end
-        end
-        if ImGui.SmallButton('Boost##slimBoost') then clicked = true end
-        if pushed > 0 then pcall(ImGui.PopStyleColor, pushed) end
-    end
-    if clicked then
-        ctrl.boost = not ctrl.boost
-        print(string.format('\ag[VF]\ax Boost %s (stub).', ctrl.boost and 'ON' or 'OFF'))
-    end
-    if ImGui.IsItemHovered() then
-        UI.setTooltip('Boost (session stub). Mini or /vf boost. No combat behavior yet.')
-    end
 end
 
 -- VF: Session Tracker Helpers (AA / Platinum).
@@ -3197,8 +3143,6 @@ function UI.drawSlimGui()
         UI.drawSlimPinButton()
         ImGui.SameLine()
         UI.drawSlimBurnButton()
-        ImGui.SameLine()
-        UI.drawSlimBoostButton()
         ImGui.SameLine()
         ImGui.TextDisabled(string.format('AA: %.1f/h', aaRate))
         UI.maybeResetTrackerOnClick('Click to reset session AA and plat tracking.')
@@ -7687,11 +7631,20 @@ runtime.satToggle = function(name)
     return runtime.satStart(name)
 end
 
--- VF: Bags is a satellite (/lua run vft/inv); Mini HUD and /vf bags toggle it.
--- VF: [VF:Inv] Opening/Closing come from the satellite, not the engine toggle.
-runtime.bagsPid = function() return runtime.satPid('vft/inv') end
-runtime.bagsRunning = function() return runtime.satRunning('vft/inv') end
-runtime.toggleBags = function() runtime.satToggle('vft/inv') end
+-- VF: Bags is a satellite (/lua run vfi); Mini HUD and /vf bags toggle it.
+-- VF: Stop leftover vft/inv so an old session cannot leave two windows.
+runtime.bagsPid = function()
+    return runtime.satPid('vfi') or runtime.satPid('vft/inv')
+end
+runtime.bagsRunning = function() return runtime.bagsPid() ~= nil end
+runtime.toggleBags = function()
+    if runtime.satStop('vfi') then
+        runtime.satStop('vft/inv')
+        return false
+    end
+    if runtime.satStop('vft/inv') then return false end
+    return runtime.satStart('vfi')
+end
 
 -- VF: Control plane for satellites -- config/vf_ctrl.txt, polled by the daemon.
 -- VF: This was an ${VF.*} TLO and it crashed the client on /lua stop; see

@@ -448,10 +448,10 @@ local function skillHoverTip(row, isDisc)
     return head .. '\n\n' .. tip
 end
 
--- VF: Disc sheet cols — Enabled|Level|Timer(group)|Name|Reuse|Duration|Burn|Boost|Mobs|Health.
+-- VF: Disc sheet cols — Enabled|Level|Timer(group)|Name|Reuse|Duration|Burn|Mobs|Health.
 local DISC_COL_ENABLED, DISC_COL_LEVEL, DISC_COL_GROUP = 1, 2, 3
 local DISC_COL_NAME, DISC_COL_REUSE, DISC_COL_DUR = 4, 5, 6
-local DISC_COL_BURN, DISC_COL_BOOST, DISC_COL_MOBS, DISC_COL_HP = 7, 8, 9, 10
+local DISC_COL_BURN, DISC_COL_MOBS, DISC_COL_HP = 7, 8, 9
 
 local function discCenterCheckbox(id, value)
     local colW = 0
@@ -503,8 +503,6 @@ local function discSortCmp(a, b, sort_specs)
                 delta = cmpNum(a.durationSec, b.durationSec)
             elseif col == DISC_COL_BURN then
                 delta = cmpNum(a.burn and 1 or 0, b.burn and 1 or 0)
-            elseif col == DISC_COL_BOOST then
-                delta = cmpNum(a.boost and 1 or 0, b.boost and 1 or 0)
             elseif col == DISC_COL_MOBS then
                 delta = cmpNum(a.mobsN, b.mobsN)
             elseif col == DISC_COL_HP then
@@ -537,7 +535,7 @@ local function drawDisciplines(state)
     local ok, err = true, nil
     if shown then
         -- VF: EndTable must run even if draw body errors (Missing EndTable pauses ImGui).
-        if ImGui.BeginTable('t3Discs', 10, flags) then
+        if ImGui.BeginTable('t3Discs', 9, flags) then
             ok, err = pcall(function()
                 local W = ImGuiTableColumnFlags.WidthFixed
                 local DS = ImGuiTableColumnFlags.DefaultSort or 0
@@ -550,7 +548,6 @@ local function drawDisciplines(state)
                 ImGui.TableSetupColumn('Reuse', W, 64, DISC_COL_REUSE)
                 ImGui.TableSetupColumn('Duration', W, 68, DISC_COL_DUR)
                 ImGui.TableSetupColumn('Burn', bitbor(W, NS), 48, DISC_COL_BURN)
-                ImGui.TableSetupColumn('Boost', bitbor(W, NS), 52, DISC_COL_BOOST)
                 ImGui.TableSetupColumn('Mobs', bitbor(W, NS), 48, DISC_COL_MOBS)
                 ImGui.TableSetupColumn('HP', bitbor(W, NS), 40, DISC_COL_HP)
                 pcall(function() ImGui.TableSetupScrollFreeze(0, 1) end)
@@ -574,7 +571,7 @@ local function drawDisciplines(state)
                     ImGui.Dummy(1, 1)
                     ImGui.TableNextColumn()
                     textMuted('No CombatAbility discs found yet.')
-                    for _ = 1, 6 do ImGui.TableNextColumn(); ImGui.Dummy(1, 1) end
+                    for _ = 1, 5 do ImGui.TableNextColumn(); ImGui.Dummy(1, 1) end
                 else
                     for _, row in ipairs(rows) do
                         -- VF: id by name only — sort must not orphan the active InputText buffer.
@@ -637,13 +634,6 @@ local function drawDisciplines(state)
                         local burn = row.burn and true or false
                         row.burn = discCenterCheckbox('##brn' .. id, burn) and true or false
                         if ImGui.IsItemHovered() then setTooltip('Burn: only while Burn is on.') end
-
-                        ImGui.TableNextColumn()
-                        local boost = row.boost and true or false
-                        row.boost = discCenterCheckbox('##bst' .. id, boost) and true or false
-                        if ImGui.IsItemHovered() then
-                            setTooltip('Boost stub — saved as boost_only, not fired yet.')
-                        end
 
                         ImGui.TableNextColumn()
                         ImGui.SetNextItemWidth(28)
@@ -1972,7 +1962,7 @@ local function drawUpdatePanel()
             Up.startCheck()
         end
         if ImGui.IsItemHovered() then
-            setTooltip('Fetch lua/vft/version.txt from GitHub. A few bytes, no zip.')
+            setTooltip('Fetch suite lua/vft/version.txt from GitHub. A few bytes, no zip.')
         end
         ImGui.SameLine(0, 8)
         if ImGui.Button('Update##vfGitUpdate', 88, 24) then

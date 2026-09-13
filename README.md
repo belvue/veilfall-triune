@@ -1,8 +1,17 @@
 # Veilfall: Triune
 
-0.6.13 — work in progress. Not a finished assistant.
+0.6.14 — work in progress. Not a finished assistant.
+
+Suite AutoRun:
 
 ```
 /lua run vf
-/lua run vfup
 ```
+
+Inventory only:
+
+```
+/lua run vfi
+```
+
+Headline is the suite number (`lua/vft/version.txt`). Inventory Check uses `lua/vft/inv/version.txt` — same `0.6.N` family. Inv snapshots bump both files to the next patch; suite-only snapshots bump only the suite file, so `/lua run vfi` stays on the last inventory release. Overlay is Manager Settings (suite) or Inventory Settings (inv, only when VF is not running).

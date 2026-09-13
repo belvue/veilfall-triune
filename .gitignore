@@ -11,8 +11,7 @@
 # --- snapshot: /lua run vf ---
 !lua/
 !lua/vf.lua
-!lua/vft.lua
-!lua/vfup.lua
+!lua/vfi.lua
 !lua/vft/
 !lua/vft/**
 lua/vft/config/*
