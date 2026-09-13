@@ -813,8 +813,8 @@ end
 -- VF: walk ? crow must be ? this for stick/Melee. Larger = wall/detour ? keep /nav.
 runtime.PATH_SLACK = 25
 runtime.STICK_POS_FLAG = { Behind = ' behind', Front = ' front', Side = ' pin' }
--- VF: RH closeness. Honest humanoid 70% of MaxRangeTo; fat/Kael-lie 30%. Re-issue on target switch.
-runtime.STICK_PCT = 70
+-- VF: stick closeness is ctrl.stick_pct (0-100 of MaxRangeTo). Default 30. No fat/human flip.
+runtime.STICK_PCT = 30
 runtime.STICK_PCT_FAT = 30
 runtime.STICK_FAT_REACH = 28
 runtime.STICK_FAT_HEIGHT = 14
@@ -904,12 +904,13 @@ local function stickNeedsHitboxOverride(id)
     return (reach > fatReach) or (height > fatH), reach, height
 end
 
--- VF: percent of MaxRangeTo for /stick. Not AvatarHeight -- that is Melee's moonwalk Dist.
-runtime.stickCloseness = function(id)
-    if select(1, stickNeedsHitboxOverride(id)) then
-        return runtime.STICK_PCT_FAT or 30
-    end
-    return runtime.STICK_PCT or 70
+-- VF: one slider. Fat hitbox used to flip 70/30 and restick every pulse.
+runtime.stickCloseness = function(_id)
+    local n = ctrl and tonumber(ctrl.stick_pct)
+    if n == nil then n = runtime.STICK_PCT or 30 end
+    if n < 0 then n = 0 end
+    if n > 100 then n = 100 end
+    return math.floor(n)
 end
 
 -- VF: fat model -- stand at MaxRangeTo, not melee_dist (inside the box → Melee walks backwards).
@@ -987,17 +988,17 @@ runtime.maxEngageDistance = function()
     return chase
 end
 
--- VF: /stick hold <point> <MaxMelee> uw. No percent stick. No mq.delay snaproll.
+-- VF: /stick hold <point> N% uw. N is stick_pct of MaxRangeTo. No mq.delay snaproll.
 runtime.assistStickCmd = function(id)
-    local dist = runtime.assistDistance(id)
+    local pct = runtime.stickCloseness(id)
     local pos = (ctrl and ctrl.stick_position) or 'Any'
     if pos == 'Front' then
-        return string.format('hold front %d uw', dist)
+        return string.format('hold front %d%% uw', pct)
     end
     if pos == 'Side' then
-        return string.format('hold moveback pin %d uw', dist)
+        return string.format('hold moveback pin %d%% uw', pct)
     end
-    return string.format('hold moveback behind %d uw', dist)
+    return string.format('hold moveback behind %d%% uw', pct)
 end
 
 -- VF: restick if not Active or PAUSED. Never /nav. E3 ProcessCombat.
@@ -1039,7 +1040,7 @@ runtime.stickToAssistTarget = function(id)
     mq.cmdf('/squelch /stick %s', cmd)
     pursuit.assistCmd = cmd
     pursuit.stickId = id
-    pursuit.stickPct = nil
+    pursuit.stickPct = runtime.stickCloseness(id)
     return true
 end
 
@@ -1984,6 +1985,7 @@ local function applyEntry(e)
         ctrl.stick_manage = nil
         if ctrl.stick_position == nil then ctrl.stick_position = 'Any' end
         if ctrl.stick_handoff == nil then ctrl.stick_handoff = runtime.STICK_HANDOFF or 120 end
+        if ctrl.stick_pct == nil then ctrl.stick_pct = runtime.STICK_PCT or 30 end
         if ctrl.hunter_z_plane == nil then ctrl.hunter_z_plane = 15 end
         if ctrl.hunter_z == nil then ctrl.hunter_z = 75 end
         ctrl.maintain_buffs = true

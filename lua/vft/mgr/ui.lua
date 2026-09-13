@@ -6,6 +6,7 @@ local S = require('vft.mgr.schema')
 local U = require('vft.mgr.util')
 local MeleeCat = require('vft.mgr.melee_catalog')
 local brand = require('vft.brand')
+local Up = require('vft.update')
 
 local M = {}
 local theme = { colN = 0, varN = 0 }
@@ -1658,6 +1659,18 @@ local function drawCombat(state)
 
     ImGui.SetNextItemWidth(160)
     do
+        local v = ImGui.SliderInt('##vfStickPct', prefs.stick_pct or 30, 0, 100, '%d%%')
+        prefs.stick_pct = tonumber(v) or prefs.stick_pct
+    end
+    ImGui.SameLine()
+    ImGui.Text('Stick %')
+    if ImGui.IsItemHovered() then
+        setTooltip('How close /stick holds, as a percent of MaxRangeTo.\n'
+            .. '30 stays outside fat hitboxes. 100 is on the skin.')
+    end
+
+    ImGui.SetNextItemWidth(160)
+    do
         local v = ImGui.SliderInt('##vfStickHandoff', prefs.stick_handoff or 120, 40, 200)
         prefs.stick_handoff = tonumber(v) or prefs.stick_handoff
     end
@@ -1945,12 +1958,38 @@ local function drawFooter(state, actions)
     end
 end
 
+local function drawUpdatePanel()
+    Up.ensureCheck()
+    local rel = Up.short(Up.releaseSha)
+    local cur = Up.short(Up.currentSha())
+    ImGui.Text('Release: ' .. (rel ~= '' and rel or (Up.busy() and 'checking…' or '—')))
+    ImGui.Text('Current: ' .. (cur ~= '' and cur or '—'))
+    local busy = Up.busy()
+    if busy then
+        if Up.note == 'updating…' then textMuted(Up.note) end
+    else
+        if ImGui.Button('Update##vfGitUpdate', 88, 24) then
+            Up.startUpdate()
+        end
+        if ImGui.IsItemHovered() then
+            setTooltip('Overlay GitHub main onto this lua folder, then restart VF.\n'
+                .. 'Does not write toon ini. Live edits that are not on main are overwritten.')
+        end
+    end
+    if Up.err ~= '' then
+        textErr(Up.err)
+    elseif Up.note ~= '' and not busy then
+        textMuted(Up.note)
+    end
+end
+
 drawSettings = function(state)
     local prefs = state.prefs
     if type(prefs) ~= 'table' then
         prefs = S.defaultPrefs()
         state.prefs = prefs
     end
+    ImGui.BeginGroup()
     ImGui.Text('Options')
     prefs.debug = ImGui.Checkbox('Debug mode##vfDebug', prefs.debug == true)
     if ImGui.IsItemHovered() then
@@ -2010,6 +2049,11 @@ drawSettings = function(state)
             prefs.med_end_stop = tonumber(v) or prefs.med_end_stop
         end
     end
+    ImGui.EndGroup()
+    ImGui.SameLine(0, 36)
+    ImGui.BeginGroup()
+    drawUpdatePanel()
+    ImGui.EndGroup()
 end
 
 drawGroup = function(state)

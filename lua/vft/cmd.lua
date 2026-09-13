@@ -211,7 +211,7 @@ function M.install(runtime, api)
                 local need = stickNeedsHitboxOverride(tid)
                 local edge = hitboxEdgeDist(tid)
                 print(string.format(
-                    '\ag[VF]\ax hitbox #%d: MaxRangeTo=%.1f Height=%.1f closeness=%d%% fat=%s edge=%d',
+                    '\ag[VF]\ax hitbox #%d: MaxRangeTo=%.1f Height=%.1f stick=%d%% fat=%s edge=%d',
                     tid, reach, height, runtime.stickCloseness(tid),
                     need and 'YES' or 'no', edge))
             end

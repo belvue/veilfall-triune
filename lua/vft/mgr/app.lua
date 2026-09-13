@@ -8,6 +8,7 @@ local UI = require('vft.mgr.ui')
 local invLocks = require('vft.inv.locks')
 local toonini = require('vft.toonini')
 local MeleeCat = require('vft.mgr.melee_catalog')
+local Up = require('vft.update')
 
 local function newState(hosted)
     return {
@@ -1580,6 +1581,7 @@ local function create(opts)
     end
 
     function app.tick()
+        Up.tick()
         if hosted and not state.open then
             refreshEntry()
             hydrateIfNeeded()

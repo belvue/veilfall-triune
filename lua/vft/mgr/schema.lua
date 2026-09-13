@@ -1157,6 +1157,7 @@ local function defaultPrefs()
         ranged = 40,
         stick_position = 'Any',
         stick_handoff = 120,
+        stick_pct = 30,
         enrage_hold = true,
         combat_heal = true,
         combat_heal_pct = 65,
@@ -1203,6 +1204,7 @@ local function copyPrefs(src)
     local spos = src.stick_position
     if STICK_POSITION_SET[spos] then p.stick_position = spos end
     p.stick_handoff = clamp(src.stick_handoff, 40, 200, p.stick_handoff)
+    p.stick_pct = clamp(src.stick_pct, 0, 100, p.stick_pct)
     p.enrage_hold = (src.enrage_hold ~= false)
     if src.combat_heal == false then
         p.combat_heal_pct = 0
@@ -1447,6 +1449,7 @@ local function writePrefsToControl(control, prefs)
     control.ranged_dist = prefs.ranged
     control.stick_position = prefs.stick_position
     control.stick_handoff = prefs.stick_handoff
+    control.stick_pct = prefs.stick_pct
     control.enrage_hold = prefs.enrage_hold ~= false
     control.combat_heal = (prefs.combat_heal_pct or 0) > 0
     control.combat_heal_pct = prefs.combat_heal_pct or 0
