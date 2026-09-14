@@ -395,6 +395,19 @@ end
 
 local function belowFromEntry(entry, typ, kind)
     -- VF: kind 'aa'|'disc'|'item'|nil â€” discs/AAs/items default blank HP%; gems use type default.
+    -- VF: Fade always owns a Below % (default 40); never snip it as filler.
+    if normalizeType(typ) == 'Fade' then
+        if not entry then return tostring(defaultBelow('Fade')) end
+        local pct = tonumber(entry.pct)
+        local stash = tonumber(entry.ui_pct or entry.t3_pct)
+        if pct == 0 then
+            if stash and stash > 0 then return tostring(stash) end
+            return tostring(defaultBelow('Fade'))
+        end
+        if pct then return tostring(pct) end
+        if stash then return tostring(stash) end
+        return tostring(defaultBelow('Fade'))
+    end
     if kind == 'aa' or kind == 'disc' or kind == 'item' then
         if not entry then return '' end
         local pct = tonumber(entry.pct)
@@ -521,6 +534,8 @@ local function thresholdFor(row)
         if n > 100 then n = 100 end
         return n
     end
+    -- VF: Fade is never an ungated filler — blank Below is the type default (40).
+    if normalizeType(row and row.type) == 'Fade' then return defaultBelow('Fade') end
     -- VF: blank Below on AAs/discs = ungated (pct nil). Gems keep type default.
     if isAaUiRow(row) or row.via == 'disc' then return nil end
     return defaultBelow(row.type)
@@ -1158,6 +1173,7 @@ local function defaultPrefs()
         melee = 14,
         ranged = 40,
         ranged_rubber = 20,
+        ranged_autofire = true,
         stick_position = 'Any',
         stick_handoff = 120,
         stick_pct = 30,
@@ -1205,6 +1221,7 @@ local function copyPrefs(src)
     p.melee = clamp(src.melee_dist or src.melee, 5, 50, p.melee)
     p.ranged = clamp(src.ranged_dist or src.ranged, 0, 300, p.ranged)
     p.ranged_rubber = clamp(src.ranged_rubber_pct or src.ranged_rubber, 0, 50, p.ranged_rubber)
+    p.ranged_autofire = (src.ranged_autofire ~= false)
     local spos = src.stick_position
     if STICK_POSITION_SET[spos] then p.stick_position = spos end
     p.stick_handoff = clamp(src.stick_handoff, 40, 200, p.stick_handoff)
@@ -1452,6 +1469,7 @@ local function writePrefsToControl(control, prefs)
     control.melee_dist = prefs.melee
     control.ranged_dist = prefs.ranged
     control.ranged_rubber_pct = prefs.ranged_rubber
+    control.ranged_autofire = prefs.ranged_autofire ~= false
     control.stick_position = prefs.stick_position
     control.stick_handoff = prefs.stick_handoff
     control.stick_pct = prefs.stick_pct

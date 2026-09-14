@@ -218,8 +218,10 @@ local function editRow(row, id, opts)
             if not (S.hpBandEditable and S.hpBandEditable(row.type)) then
                 row.above = ''
             end
-            -- VF: AAs default blank Below (filler); gems/discs keep type default.
-            if row.gem == nil and row.via ~= 'disc' then
+            -- VF: Fade always seeds Below % (never AA filler blank). Other AAs stay blank.
+            if row.type == 'Fade' and S.defaultBelow then
+                row.below = tostring(S.defaultBelow('Fade'))
+            elseif row.gem == nil and row.via ~= 'disc' then
                 row.below = ''
                 row.above = ''
             elseif S.defaultBelow then
@@ -296,10 +298,10 @@ local function editRow(row, id, opts)
         if ImGui.IsItemHovered() then
             if not bandOk then
                 setTooltip('Above/Below not used for this Type (Buff / PetBuff / Summon / Cure).')
+            elseif row.type == 'Fade' or kind == 'self' then
+                setTooltip('Below % -- your HP. Fire when your HP is at or below this (Heal / Panic / HoT / Tap / Fade).')
             elseif row.gem == nil and row.via ~= 'disc' then
                 setTooltip('Below % — blank = combat-only filler (instant AA, enabled only). Set a value to gate on HP.')
-            elseif kind == 'self' then
-                setTooltip('Below % -- your HP. Fire when your HP is at or below this (Heal / Panic / HoT / Tap / Fade).')
             else
                 setTooltip('Below % -- target HP. Fire when mob/pet HP is at or below this (Nuke / DoT / Debuff / Melee / CC / PetHeal).')
             end
@@ -1586,6 +1588,18 @@ local function drawRangedSliders(prefs, id, distLabel)
     end
 end
 
+-- VF: same prefs key as Combat. Shown next to Style when Ranged.
+local function drawAutofireBox(prefs, id)
+    local on = prefs.ranged_autofire ~= false
+    local nv = ImGui.Checkbox('Autofire##' .. id, on)
+    prefs.ranged_autofire = nv and true or false
+    if ImGui.IsItemHovered() then
+        setTooltip('On: /autofire only at stand-off. No /attack on, no /killthis.\n'
+            .. 'Off: park and face; spells and clickies still fire.\n'
+            .. 'Summoned or no mesh park falls back to melee.')
+    end
+end
+
 -- VF: Combat tab = how THIS character fights. Per-zone route editing lives in
 -- VF: the waypoints window (/vf wp); duplicating it here drifted out of sync.
 local function drawCombat(state)
@@ -1627,6 +1641,10 @@ local function drawCombat(state)
     if ImGui.IsItemHovered() then
         setTooltip('Melee closes and swings. Ranged holds at Stand-off and autofires.\n'
             .. 'Spells are not a style -- they fire from the loadout in either one.')
+    end
+    if (prefs.style or 'Melee') == 'Ranged' then
+        ImGui.SameLine()
+        drawAutofireBox(prefs, 'vfRangeAF')
     end
 
     ImGui.SetNextItemWidth(160)
@@ -1708,8 +1726,9 @@ local function drawCombat(state)
         ImGui.SameLine()
         ImGui.Text('Chase leash')
         if ImGui.IsItemHovered() then
-            setTooltip('Furthest we will chase a mob, and how far we will stray from a\n'
-                .. 'waypoint to do it. Per zone. Rush ignores it -- it only pulls the pin.')
+            setTooltip('Furthest Group/Rush will chase a mob, and how far we stray from a\n'
+                .. 'waypoint to do it. Per zone. Roam uses Look out to instead.\n'
+                .. 'Rush travel ignores it -- it only pulls the pin.')
         end
     else
         textMuted('Chase leash: zone in to set (per zone).')
@@ -1830,7 +1849,7 @@ local function drawCombat(state)
     ImGui.Text('Scanning')
     ImGui.Separator()
     if pack then
-        textMuted('Per zone. Rush ignores both -- it only pulls the pin.')
+        textMuted('Per zone. Roam hunts and keeps this far. Rush ignores both -- it only pulls the pin.')
         ImGui.SetNextItemWidth(160)
         do
             local scan = pack.scan or pack.wander or pack.range or 1500
@@ -1842,7 +1861,8 @@ local function drawCombat(state)
         ImGui.SameLine()
         ImGui.Text('Look out to')
         if ImGui.IsItemHovered() then
-            setTooltip('How far to look for something to pull.')
+            setTooltip('How far Roam looks for a pull, and how far it will keep and close.\n'
+                .. 'Chase leash is not this number.')
         end
 
         ImGui.SetNextItemWidth(160)
@@ -2111,8 +2131,12 @@ local function taggedFadeNames(state)
     local function consider(name, rec)
         if type(rec) ~= 'table' then return end
         if rec.enabled == false then return end
+        if rec.pct == 0 then return end
         local t = S.normalizeType(rec.cast_type or rec.t3_type or rec.type)
-        if t == 'Fade' then add(name) end
+        if t ~= 'Fade' then return end
+        local n = tonumber(rec.pct or rec.ui_pct)
+        if n == nil or n < 1 then n = (S.defaultBelow and S.defaultBelow('Fade')) or 40 end
+        add(string.format('%s @ %d%%', name, n))
     end
     local ce = state and state.charEntry
     if type(ce) ~= 'table' then return names end
@@ -2225,6 +2249,8 @@ drawGroup = function(state)
             .. 'If we cannot nav to a LoS park, we fall back to melee (stick).')
     end
     if (prefs.style or 'Melee') == 'Ranged' then
+        ImGui.SameLine()
+        drawAutofireBox(prefs, 'vfGrpRangeAF')
         drawRangedSliders(prefs, 'vfGrpRange', 'Max distance')
     end
 

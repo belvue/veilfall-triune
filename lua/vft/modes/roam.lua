@@ -46,6 +46,7 @@ function M.install(runtime, api)
             local tid = mq.TLO.Target.ID() or 0
             local tspawn = mq.TLO.Spawn(tid)
             local maxScan = ctrl.hunter_radius or 1500
+            if runtime.roamScanDist then maxScan = runtime.roamScanDist() end
             -- VF: Hysteresis so a spawn on the radius edge is not dropped the next tick.
             local dropDist = maxScan * 1.3 + 50
             if not tspawn() or tspawn.Dead() or tspawn.Type() == 'Corpse' then
@@ -58,9 +59,8 @@ function M.install(runtime, api)
                 haveNPC = false
                 mq.cmd('/target clear')
             elseif wantsFight and wantsFight(tid) then
-                local maxXtarDist = (ctrl.xtar_nav_dist or 150)
-                if distToId(tid) > (maxXtarDist + 20) and not mq.TLO.Me.Combat() then
-                    -- VF: wantsFight beyond Chase + buffer and not swinging.
+                -- VF: tagged keep-range is Look out to, not Chase leash.
+                if distToId(tid) > dropDist and not mq.TLO.Me.Combat() then
                     haveNPC = false
                     mq.cmd('/target clear')
                     stopMoving()
@@ -102,7 +102,8 @@ function M.install(runtime, api)
             end
         end
 
-        local fightId = closestThreat and closestThreat(ctrl.xtar_nav_dist or 150)
+        local fightId = closestThreat and closestThreat(
+            (runtime.roamScanDist and runtime.roamScanDist()) or (ctrl.hunter_radius or 1500))
         if fightId and runtime.routeKind() == 'loop' then
             local wp, _, wpRange = runtime.currentHuntWp()
             if wp and not runtime.huntIdNearWp(fightId, wp, wpRange)
@@ -117,8 +118,9 @@ function M.install(runtime, api)
                 pursuit.id = 0
                 pursuit.lastNavTargetId = 0
                 if setTarget(fightId) then
-                    print(string.format('\ay[VF]\ax Roam fight nearby -- engaging #%d (%s) [dist %.1f, max chase %d]',
-                        fightId, tostring(mq.TLO.Target.CleanName()), distToId(fightId), ctrl.xtar_nav_dist or 150))
+                    print(string.format('\ay[VF]\ax Roam fight nearby -- engaging #%d (%s) [dist %.1f, look out %d]',
+                        fightId, tostring(mq.TLO.Target.CleanName()), distToId(fightId),
+                        (runtime.roamScanDist and runtime.roamScanDist()) or (ctrl.hunter_radius or 1500)))
                 end
                 haveNPC = true
             end
@@ -279,11 +281,19 @@ function M.install(runtime, api)
                 stopMoving()
                 arrived = true
             elseif (wantsFight and wantsFight(id)) or mq.TLO.Me.Combat() then
-                -- VF: tagged melee close is AssistOn in combatTick, not /nav.
+                -- VF: tagged melee close is AssistOn in the stick band. Further out,
+                -- VF: Roam still walks in — Look out to, not Chase.
                 if (ctrl.combat_style or 'Melee') == 'Ranged' then
                     arrived = moveToward(id, desiredRange(id))
                 else
-                    arrived = true
+                    local d = distToId(id)
+                    local maxEng = (runtime.maxEngageDistance and runtime.maxEngageDistance())
+                        or (ctrl.xtar_nav_dist or 150)
+                    if d > maxEng then
+                        arrived = moveToward(id, desiredRange(id))
+                    else
+                        arrived = true
+                    end
                 end
             else
                 arrived = moveToward(id, reqRange)
@@ -362,7 +372,9 @@ function M.install(runtime, api)
                     end
                 end
             elseif wantsFight and wantsFight(id) then
-                if distToId(id) <= (ctrl.xtar_nav_dist or 150) and hasLoS(id) then
+                local maxEng = (runtime.maxEngageDistance and runtime.maxEngageDistance())
+                    or (ctrl.xtar_nav_dist or 150)
+                if distToId(id) <= maxEng and hasLoS(id) then
                     engage = true
                 end
             end

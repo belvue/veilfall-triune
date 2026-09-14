@@ -132,6 +132,22 @@ function M.install(runtime, api)
         return h
     end
 
+    -- VF: Rooted is a buff TLO (name), Stunned is bool. Summon often roots in melee.
+    local function cannotPark()
+        local stuck = false
+        pcall(function()
+            if mq.TLO.Me.Stunned() then stuck = true; return end
+            local r = mq.TLO.Me.Rooted
+            if r and r.ID and (tonumber(r.ID()) or 0) > 0 then stuck = true; return end
+            local n = r and r()
+            if n and n ~= false then
+                local s = tostring(n)
+                if s ~= '' and s ~= 'NULL' and s ~= 'nil' and s ~= '0' then stuck = true end
+            end
+        end)
+        return stuck
+    end
+
     -- VF: y,x,z:y2,x2,z2. Fail open if the TLO errors.
     local function locLos(x, y, z, tx, ty, tz)
         local got = false
@@ -206,6 +222,12 @@ function M.install(runtime, api)
             runtime.rangedFaceAt = now
             mq.cmdf('/face fast id %d', tid)
         end
+        local ctrl = getCtrl()
+        -- VF: Autofire on = /autofire only. Never /attack on or /killthis at stand-off.
+        if ctrl and ctrl.ranged_autofire == false then
+            if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+            return
+        end
         if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
     end
 
@@ -213,8 +235,13 @@ function M.install(runtime, api)
         st.meleeId = tid
         st.dest = nil
         if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-        if runtime.ensureAttack then runtime.ensureAttack(tid) end
-        if runtime.stickPursue then runtime.stickPursue(tid) end
+        -- VF: AssistOn — ensureAttack + stick. meleeNow opens those gates for this id.
+        if runtime.assistOn then
+            runtime.assistOn(tid)
+        else
+            if runtime.ensureAttack then runtime.ensureAttack(tid) end
+            if runtime.stickPursue then runtime.stickPursue(tid) end
+        end
         if not st.warnedMelee then
             st.warnedMelee = true
             print(string.format('\ay[VF]\ax Ranged -- no LoS nav park (%s); melee until this mob dies.',
@@ -286,6 +313,17 @@ function M.install(runtime, api)
                 return
             end
             meleeFallback(tid, 'latched')
+            return
+        end
+
+        -- VF: rooted/summoned in melee → real melee. Stuck out of melee → shoot from here.
+        if cannotPark() then
+            if d <= maxMeleeDistance(tid) then
+                meleeFallback(tid, 'rooted/summoned')
+                return
+            end
+            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+            holdShot(tid)
             return
         end
 

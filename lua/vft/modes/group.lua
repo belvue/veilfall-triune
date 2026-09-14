@@ -751,7 +751,7 @@ function M.install(runtime, api)
         return out
     end
 
-    -- VF: matches schema defaultBelow('Fade'). Old always-Fade rows saved pct 100 / nil.
+    -- VF: matches schema defaultBelow('Fade'). Nil (unset) is 40; a saved 1–100 is that HP.
     local FADE_DEFAULT_PCT = 40
 
     local function mePctHps()
@@ -762,8 +762,9 @@ function M.install(runtime, api)
 
     local function fadeNeedPct(entry)
         local n = tonumber(entry and (entry.pct or entry.ui_pct))
-        if n == nil or n >= 100 then n = FADE_DEFAULT_PCT end
+        if n == nil then n = FADE_DEFAULT_PCT end
         if n < 1 then return nil end
+        if n > 100 then n = 100 end
         return n
     end
 
@@ -806,7 +807,7 @@ function M.install(runtime, api)
         return false
     end
 
-    -- VF: Group only, not MT. Dump when our HP is at or below the Fade row.
+    -- VF: Group only, not MT. Dump when our HP is at or below the Fade row's Below %.
     function runtime.groupFadeHold()
         return os.clock() < (st.fadeHoldUntil or 0)
     end
