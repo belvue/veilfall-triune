@@ -1,7 +1,7 @@
 -- VF: Group mode — follow the anchor; fight when MA/MT declare a mob.
 -- VF: Anchor (follow) = ctrl.ma_name override, else Group.MainAssist / MainTank / Puller / Leader.
 -- VF: Mob = Me.GroupAssistTarget (MA), else MainTank.Target, else follow-anchor.Target.
--- VF: Fade = Loadout Type Fade; dump hate when a mob is on us and we are not the Main Tank.
+-- VF: Fade = Loadout Type Fade; Group dump when our HP is at or below the row, not MT.
 
 local mq = require('mq')
 
@@ -751,6 +751,22 @@ function M.install(runtime, api)
         return out
     end
 
+    -- VF: matches schema defaultBelow('Fade'). Old always-Fade rows saved pct 100 / nil.
+    local FADE_DEFAULT_PCT = 40
+
+    local function mePctHps()
+        local p = 100
+        pcall(function() p = tonumber(mq.TLO.Me.PctHPs()) or 100 end)
+        return p
+    end
+
+    local function fadeNeedPct(entry)
+        local n = tonumber(entry and (entry.pct or entry.ui_pct))
+        if n == nil or n >= 100 then n = FADE_DEFAULT_PCT end
+        if n < 1 then return nil end
+        return n
+    end
+
     local function fireDoability(name)
         local ready = false
         pcall(function() ready = not not mq.TLO.Me.AbilityReady(name)() end)
@@ -790,7 +806,7 @@ function M.install(runtime, api)
         return false
     end
 
-    -- VF: Group only, not MT. Dump when a mob has hate on us (ToT/holder/100%).
+    -- VF: Group only, not MT. Dump when our HP is at or below the Fade row.
     function runtime.groupFadeHold()
         return os.clock() < (st.fadeHoldUntil or 0)
     end
@@ -807,27 +823,28 @@ function M.install(runtime, api)
         local now = os.clock()
         if now < (st.fadeHoldUntil or 0) then return end
         if (now - (st.fadeAt or 0)) < 0.5 then return end
-        local onMe = false
-        local tid = 0
-        pcall(function() tid = mq.TLO.Target.ID() or 0 end)
-        if tid > 0 and runtime.spawnIsOnMe and runtime.spawnIsOnMe(tid) then
-            onMe = true
-        elseif runtime.closestMobOnMe and runtime.closestMobOnMe(80) then
-            onMe = true
-        end
-        if not onMe then return end
+        local hp = mePctHps()
         local list = fadeCandidates()
         if #list == 0 then return end
+        table.sort(list, function(a, b)
+            return (fadeNeedPct(a.entry) or 0) > (fadeNeedPct(b.entry) or 0)
+        end)
+        local anyGate = false
         for i = 1, #list do
-            if fireFadeEntry(list[i]) then
-                st.fadeAt = now
-                st.fadeHoldUntil = now + 1.5
-                print(string.format('\ag[VF]\ax Group Fade -- %s (aggro on us).', list[i].name))
-                log('fade ' .. list[i].name)
-                return
+            local need = fadeNeedPct(list[i].entry)
+            if need and hp <= need then
+                anyGate = true
+                if fireFadeEntry(list[i]) then
+                    st.fadeAt = now
+                    st.fadeHoldUntil = now + 1.5
+                    print(string.format('\ag[VF]\ax Group Fade -- %s at %d%% (below %d).',
+                        list[i].name, hp, need))
+                    log(string.format('fade %s hp=%d need=%d', list[i].name, hp, need))
+                    return
+                end
             end
         end
-        st.fadeAt = now
+        if anyGate then st.fadeAt = now end
     end
 
     function runtime.groupModeTick()

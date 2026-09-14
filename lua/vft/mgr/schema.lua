@@ -88,6 +88,7 @@ end
 
 local function defaultBelow(typ)
     if typ == 'Panic' then return 20 end
+    if typ == 'Fade' then return 40 end
     if typ == 'Heal' or typ == 'HoT' or typ == 'PetHeal' or typ == 'Tap' then return 75 end
     if typ == 'Cure' then return 100 end
     if typ == 'Melee' or typ == 'DoT' or typ == 'Nuke' or typ == 'Debuff' or typ == 'CC' then
@@ -111,7 +112,7 @@ end
 local function hpBandKind(typ)
     typ = normalizeType(typ) or typ
     -- VF: Tap = my HP band, cast on mob (mapType sets E: Current Target).
-    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' or typ == 'Tap' then return 'self' end
+    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' or typ == 'Tap' or typ == 'Fade' then return 'self' end
     if typ == 'Nuke' or typ == 'DoT' or typ == 'Debuff' or typ == 'Melee'
         or typ == 'CC' or typ == 'PetHeal' then
         return 'target'
@@ -130,13 +131,12 @@ local function mapType(typ)
     typ = normalizeType(typ) or typ
     if typ == 'Buff' then return 'missing buff', 'F: Myself' end
     if typ == 'PetBuff' then return 'missing buff', 'F: Pet' end
-    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' then return 'my HP <=', 'F: Myself' end
+    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' or typ == 'Fade' then return 'my HP <=', 'F: Myself' end
     if typ == 'Tap' then return 'my HP <=', 'E: Current Target' end
     if typ == 'PetHeal' then return 'HP <=', 'F: Pet' end
     if typ == 'Cure' then return 'has Poison/Disease', 'F: Myself' end
     if typ == 'Summon' then return 'missing pet', 'F: Myself' end
     if typ == 'CC' then return 'target HP <=', 'E: Unmezzed Add' end
-    if typ == 'Fade' then return 'always', 'F: Myself' end
     if typ == 'Melee' then return 'target HP <=', 'E: Current Target' end
     if typ == 'DoT' or typ == 'Nuke' or typ == 'Debuff' then
         return 'target HP <=', 'E: Current Target'

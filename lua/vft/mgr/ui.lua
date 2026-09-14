@@ -228,7 +228,7 @@ local function editRow(row, id, opts)
         end
     end
     if ImGui.IsItemHovered() then
-        setTooltip('Melee = MQ2Melee skill. Nuke = kill target. Tap = lifetap (my HP %, cast on mob, heal priority). DoT/Debuff = same on-mob gate. CC = Unmezzed Add. Heal = my HP %. HoT = my HP % and missing on buff/short. Cure = only this row; fires when a counter it strips (curse/poison/disease/corruption) is on your bar. Panic = my HP %. Fade = Group dump when aggro is on you (not Main Tank). PetHeal/PetBuff = your pet. Burn = row checkbox.')
+        setTooltip('Melee = MQ2Melee skill. Nuke = kill target. Tap = lifetap (my HP %, cast on mob, heal priority). DoT/Debuff = same on-mob gate. CC = Unmezzed Add. Heal = my HP %. HoT = my HP % and missing on buff/short. Cure = only this row; fires when a counter it strips (curse/poison/disease/corruption) is on your bar. Panic = my HP %. Fade = Group dump at your Below HP % (not Main Tank). PetHeal/PetBuff = your pet. Burn = row checkbox.')
     end
 
     ImGui.TableNextColumn()
@@ -299,7 +299,7 @@ local function editRow(row, id, opts)
             elseif row.gem == nil and row.via ~= 'disc' then
                 setTooltip('Below % — blank = combat-only filler (instant AA, enabled only). Set a value to gate on HP.')
             elseif kind == 'self' then
-                setTooltip('Below % -- your HP. Fire when your HP is at or below this (Heal / Panic / HoT / Tap).')
+                setTooltip('Below % -- your HP. Fire when your HP is at or below this (Heal / Panic / HoT / Tap / Fade).')
             else
                 setTooltip('Below % -- target HP. Fire when mob/pet HP is at or below this (Nuke / DoT / Debuff / Melee / CC / PetHeal).')
             end
@@ -2229,13 +2229,13 @@ drawGroup = function(state)
     end
 
     ImGui.Dummy(0, 12)
-    ImGui.Text('Aggro')
-    textMuted('Tag a Loadout row Type = Fade (AA, disc, gem, or clicky).')
-    textMuted('Fires when a mob has hate on you. Skipped if you are the Main Tank.')
+    ImGui.Text('Fade')
+    textMuted('Tag a Loadout row Type = Fade. Below % is your HP.')
+    textMuted('Fires in Group when you are that low. Skipped if you are the Main Tank.')
     do
         local tagged = taggedFadeNames(state)
         if #tagged == 0 then
-            textMuted('No Fade row — we detect aggro (/vf aggro) but will not dump.')
+            textMuted('No Fade row — set Type = Fade and a Below % on Loadout.')
         else
             textMuted('Fade: ' .. table.concat(tagged, ', '))
         end
