@@ -2761,7 +2761,7 @@ end
 function UI.drawSlimBagButton()
     UI.drawSlimTexButton('bagTexTried', 'bagTex', 'vf-bag.png', 'Bag##slimBags', function()
         if toggleVfInv then toggleVfInv() end
-    end, 'Inv. /vf inv (/lua run vfi)')
+    end, 'Inv. /vf inv (/lua run vft/inv)')
 end
 
 function UI.drawSlimGearButton()
@@ -7631,19 +7631,19 @@ runtime.satToggle = function(name)
     return runtime.satStart(name)
 end
 
--- VF: Bags is a satellite (/lua run vfi); Mini HUD and /vf bags toggle it.
--- VF: Stop leftover vft/inv so an old session cannot leave two windows.
+-- VF: Bags is a satellite (/lua run vft/inv). Mini HUD and /vf bags toggle it.
+-- VF: Old suite overlay copies vft/**, not lua/vfi.lua — never start /lua run vfi from Mini.
 runtime.bagsPid = function()
-    return runtime.satPid('vfi') or runtime.satPid('vft/inv')
+    return runtime.satPid('vft/inv') or runtime.satPid('vfi')
 end
 runtime.bagsRunning = function() return runtime.bagsPid() ~= nil end
 runtime.toggleBags = function()
-    if runtime.satStop('vfi') then
-        runtime.satStop('vft/inv')
+    if runtime.satStop('vft/inv') then
+        runtime.satStop('vfi')
         return false
     end
-    if runtime.satStop('vft/inv') then return false end
-    return runtime.satStart('vfi')
+    if runtime.satStop('vfi') then return false end
+    return runtime.satStart('vft/inv')
 end
 
 -- VF: Control plane for satellites -- config/vf_ctrl.txt, polled by the daemon.

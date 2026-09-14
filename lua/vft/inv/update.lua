@@ -15,7 +15,7 @@ M.state = true
 
 local job = nil
 local currentCache, currentAt = '', -1
-local VER_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt'
+local VER_URL = 'https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/inv/version.txt'
 
 -- VF: mq.luaDir can be relative 'lua'. Resolve against configDir, never PowerShell CWD.
 local function luaDir()
@@ -143,7 +143,8 @@ function Cmp-Ver([string]$a, [string]$b) {
     return 0
 }
 try {
-    $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt"
+    $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/inv/version.txt"
+    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt" }
     if (-not $rel) { throw 'inv version missing' }
     $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
     $vfiDest = Join-Path $LuaDir 'vfi.lua'
@@ -238,7 +239,7 @@ end
 
 function M.reloadVfi()
     pcall(function()
-        mq.cmd('/multiline ; /lua stop vfi; /lua stop vft/inv; /timed 10 /lua run vfi')
+        mq.cmd('/multiline ; /lua stop vfi; /lua stop vft/inv; /timed 10 /lua run vft/inv')
     end)
 end
 
