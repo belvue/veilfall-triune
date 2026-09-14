@@ -5,6 +5,7 @@
 
 local mq = require('mq')
 local Chan = require('vft.updatechan')
+local Ver = require('vft.ver')
 
 local M = {}
 
@@ -60,26 +61,15 @@ local function readFile(path)
 end
 
 function M.parseVer(body)
-    body = tostring(body or '')
-    if body == '' or body:find('404:', 1, true) or body:find('<', 1, true) then
-        return ''
-    end
-    local line = body:match('^%s*([^\r\n]+)') or ''
-    return line:match('(%d+%.%d+%.%d+)') or ''
+    return Ver.parse(body)
 end
 
 function M.parseParts(v)
-    local a, b, c = tostring(v or ''):match('(%d+)%.(%d+)%.(%d+)')
-    return tonumber(a) or 0, tonumber(b) or 0, tonumber(c) or 0
+    return Ver.parts(v)
 end
 
 function M.cmpVer(a, b)
-    local a1, a2, a3 = M.parseParts(a)
-    local b1, b2, b3 = M.parseParts(b)
-    if a1 ~= b1 then return (a1 < b1) and -1 or 1 end
-    if a2 ~= b2 then return (a2 < b2) and -1 or 1 end
-    if a3 ~= b3 then return (a3 < b3) and -1 or 1 end
-    return 0
+    return Ver.cmp(a, b)
 end
 
 function M.display(v)
@@ -133,15 +123,23 @@ function Get-Ver([string]$url) {
     $raw = Get-Content $f -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { return '' }
     if ($raw -match '404:') { return '' }
+    if ($raw -match '(\d+\.\d+\.\d+\.\d+)') { return $Matches[1] }
     if ($raw -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
     return ''
 }
+function Ver-Parts([string]$v) {
+    if ($v -match '(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4])
+    }
+    if ($v -match '(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], 0)
+    }
+    return @(0, 0, 0, 0)
+}
 function Cmp-Ver([string]$a, [string]$b) {
-    $ax = @(0, 0, 0)
-    if ($a -match '(\d+)\.(\d+)\.(\d+)') { $ax = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    $bx = @(0, 0, 0)
-    if ($b -match '(\d+)\.(\d+)\.(\d+)') { $bx = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    for ($i = 0; $i -lt 3; $i++) {
+    $ax = Ver-Parts $a
+    $bx = Ver-Parts $b
+    for ($i = 0; $i -lt 4; $i++) {
         if ($ax[$i] -lt $bx[$i]) { return -1 }
         if ($ax[$i] -gt $bx[$i]) { return 1 }
     }
@@ -161,7 +159,8 @@ try {
     $vfiDest = Join-Path $LuaDir 'vfi.lua'
     $old = '0.0.0'
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
-    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
+    if ($old -match '(\d+\.\d+\.\d+\.\d+)') { $old = $Matches[1] }
+    elseif ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
     if (-not $Force -and (Test-Path $vfiDest) -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
     & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$Branch"
@@ -189,7 +188,7 @@ try {
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         Copy-Item $_.FullName $dest -Force
     }
-    foreach ($relName in @('vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
+    foreach ($relName in @('vft\ver.lua', 'vft\updatechan.lua', 'vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
         $from = Join-Path $luaSrc $relName
         if (Test-Path $from) {
             $dest = Join-Path $LuaDir $relName
@@ -284,7 +283,7 @@ local function finishCheck()
 end
 
 local function takeVer(result)
-    return M.parseVer(result) ~= '' and M.parseVer(result) or (result:match('(%d+%.%d+%.%d+)%s*$') or '')
+    return M.parseVer(result) ~= '' and M.parseVer(result) or (result:match('(%d+%.%d+%.%d+%.%d+)') or result:match('(%d+%.%d+%.%d+)%s*$') or '')
 end
 
 local function finishUpdate(result)

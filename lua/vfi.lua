@@ -41,6 +41,8 @@ local function ensureInvTree()
         'vft/brand.lua',
         'vft/powersource.lua',
         'vft/toonini.lua',
+        'vft/ver.lua',
+        'vft/updatechan.lua',
         'vft/inv/app.lua',
         'vft/inv/boot.lua',
         'vft/inv/locks.lua',
@@ -105,15 +107,23 @@ function Get-Ver([string]$url) {
     $raw = Get-Content $f -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { return '' }
     if ($raw -match '404:') { return '' }
+    if ($raw -match '(\d+\.\d+\.\d+\.\d+)') { return $Matches[1] }
     if ($raw -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
     return ''
 }
+function Ver-Parts([string]$v) {
+    if ($v -match '(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4])
+    }
+    if ($v -match '(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], 0)
+    }
+    return @(0, 0, 0, 0)
+}
 function Cmp-Ver([string]$a, [string]$b) {
-    $ax = @(0, 0, 0)
-    if ($a -match '(\d+)\.(\d+)\.(\d+)') { $ax = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    $bx = @(0, 0, 0)
-    if ($b -match '(\d+)\.(\d+)\.(\d+)') { $bx = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    for ($i = 0; $i -lt 3; $i++) {
+    $ax = Ver-Parts $a
+    $bx = Ver-Parts $b
+    for ($i = 0; $i -lt 4; $i++) {
         if ($ax[$i] -lt $bx[$i]) { return -1 }
         if ($ax[$i] -gt $bx[$i]) { return 1 }
     }
@@ -125,7 +135,8 @@ try {
     $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
     $old = '0.0.0'
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
-    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
+    if ($old -match '(\d+\.\d+\.\d+\.\d+)') { $old = $Matches[1] }
+    elseif ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
     if (-not $Force -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
     & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$Branch"
@@ -152,7 +163,7 @@ try {
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         Copy-Item $_.FullName $dest -Force
     }
-    foreach ($relName in @('vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
+    foreach ($relName in @('vft\ver.lua', 'vft\updatechan.lua', 'vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
         $from = Join-Path $luaSrc $relName
         if (Test-Path $from) {
             $dest = Join-Path $LuaDir $relName
