@@ -422,33 +422,36 @@ function M.install(runtime, api)
             runtime.rushLog(rushNote)
         end
 
-        if pinKind == 'guide' then
-            -- VF: Mid-summon / displace on a Guide must not wipe the fight latch and keep rushing.
-            -- VF: live haters (not pin pack) also hold — roll-through with aggro was leaving adds.
-            local holdFight = runtime.nav.fighting or runtime.nav.reanchor
+        -- VF: Loop pins own the fight. Guide/travel ignore until we arrive at a Loop.
+        -- VF: hate>0 on a Guide used to fall through and vacuum the path (closestThreat).
+        if pinKind ~= 'loop' then
+            local yanked = runtime.nav.reanchor
                 or ((runtime.nav.displaceHoldUntil or 0) > os.clock())
-                or (tonumber(hate) or 0) > 0
-            if not holdFight then
+            if not yanked then
                 runtime.nav.fighting = false
                 if runtime.markHuntLoc then runtime.markHuntLoc(wp) end
-                local repinned = W.rushRepinIfClose(locs, idx, wp, d2, d3)
-                if repinned then return repinned end
+                if pinKind == 'guide' then
+                    local repinned = W.rushRepinIfClose(locs, idx, wp, d2, d3)
+                    if repinned then return repinned end
+                end
+                if onPin then
+                    return W.advance(locs, idx, pinKind .. ' pass-through')
+                end
                 if W.stalled(idx, wp, d2, pinKind) then
                     return W.advance(locs, idx, 'unreachable pin')
                 end
-                -- VF: holdFight already covers the latched cases; this covers aggro the
-                -- VF: latch never saw (wanderer, train) without waiting for a summon.
                 if not runtime.attackReleaseOk or runtime.attackReleaseOk() then
                     if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+                    if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
                     pcall(function()
                         if mq.TLO.Target() and mq.TLO.Target.Type() == 'NPC' then mq.cmd('/target clear') end
                     end)
                 end
-                -- VF: Always aim at CURRENT guide until chain repin. Lookahead to next flip-flopped at ~20/40.
-                moveTowardLoc(wp.x, wp.y, wp.z, 1)
+                local arrive = (pinKind == 'guide') and 1 or W.RANGE.travelPark
+                moveTowardLoc(wp.x, wp.y, wp.z, arrive)
                 return 'travel'
             end
-            -- VF: Fall through to the fight latch below (same as a Loop pin).
+            -- VF: summon/yank mid-guide — hold the fight until displace clears, then re-anchor.
             if not runtime.nav.fighting then
                 runtime.nav.fighting = true
                 runtime.nav.arrivedAt = runtime.nav.arrivedAt or os.clock()

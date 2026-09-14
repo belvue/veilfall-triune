@@ -1,21 +1,25 @@
--- VF: overlay GitHub main onto mq.luaDir. Manager Settings Check/Update (suite).
+-- VF: overlay GitHub branch (main or beta) onto mq.luaDir. Manager Settings Check/Update (suite).
 -- VF: Suite overlay is vf.lua + vfi.lua + vft/**. Inv overlay is inventory-only.
--- VF: Check fetches lua/vft/version.txt (0.N.N). Never on draw. README is fallback.
+-- VF: Check fetches lua/vft/version.txt (0.6.N or 0.6.N.B). Never on draw.
+-- VF: Branch is vft.updatechan (config/vf_overlay.lua), not a toon loadout.
 
 local mq = require('mq')
+local Chan = require('vft.updatechan')
+local Ver = require('vft.ver')
 
 local M = {}
 
-M.REPO = 'belvue/veilfall-triune'
-M.BRANCH = 'main'
+M.REPO = Chan.REPO
 M.release = ''
 M.note = ''
 M.err = ''
 
 local job = nil
 local currentCache, currentAt = '', -1
-local VER_URL = 'https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/version.txt'
-local README_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md'
+
+function M.branch()
+    return Chan.branch()
+end
 
 -- VF: mq.luaDir can be relative 'lua'. Resolve against configDir, never PowerShell CWD.
 local function luaDir()
@@ -56,26 +60,15 @@ local function readFile(path)
 end
 
 function M.parseVer(body)
-    body = tostring(body or '')
-    if body == '' or body:find('404:', 1, true) or body:find('<', 1, true) then
-        return ''
-    end
-    local line = body:match('^%s*([^\r\n]+)') or ''
-    return line:match('(%d+%.%d+%.%d+)') or ''
+    return Ver.parse(body)
 end
 
 function M.parseParts(v)
-    local a, b, c = tostring(v or ''):match('(%d+)%.(%d+)%.(%d+)')
-    return tonumber(a) or 0, tonumber(b) or 0, tonumber(c) or 0
+    return Ver.parts(v)
 end
 
 function M.cmpVer(a, b)
-    local a1, a2, a3 = M.parseParts(a)
-    local b1, b2, b3 = M.parseParts(b)
-    if a1 ~= b1 then return (a1 < b1) and -1 or 1 end
-    if a2 ~= b2 then return (a2 < b2) and -1 or 1 end
-    if a3 ~= b3 then return (a3 < b3) and -1 or 1 end
-    return 0
+    return Ver.cmp(a, b)
 end
 
 function M.display(v)
@@ -101,7 +94,9 @@ end
 local PS = [=[
 param(
     [Parameter(Mandatory = $true)][string]$LuaDir,
-    [Parameter(Mandatory = $true)][string]$OutFile
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [switch]$Force,
+    [string]$Branch = 'main'
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -112,7 +107,7 @@ Write-Status 'run'
 $LuaDir = [IO.Path]::GetFullPath($LuaDir)
 if (-not (Test-Path $LuaDir)) { Write-Status "err lua dir missing"; exit 1 }
 $repo = 'belvue/veilfall-triune'
-$branch = 'main'
+if ($Branch -ne 'beta') { $Branch = 'main' }
 $token = $env:VF_GITHUB_TOKEN
 $headers = @('-sL', '-H', 'User-Agent: VF-Update')
 if ($token) { $headers += @('-H', "Authorization: Bearer $token") }
@@ -125,32 +120,47 @@ function Get-Ver([string]$url) {
     $raw = Get-Content $f -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { return '' }
     if ($raw -match '404:') { return '' }
+    if ($raw -match '(\d+\.\d+\.\d+\.\d+)') { return $Matches[1] }
     if ($raw -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
     return ''
 }
+function Ver-Parts([string]$v) {
+    if ($v -match '(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4])
+    }
+    if ($v -match '(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], 0)
+    }
+    return @(0, 0, 0, 0)
+}
 function Cmp-Ver([string]$a, [string]$b) {
-    $ax = @(0, 0, 0)
-    if ($a -match '(\d+)\.(\d+)\.(\d+)') { $ax = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    $bx = @(0, 0, 0)
-    if ($b -match '(\d+)\.(\d+)\.(\d+)') { $bx = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    for ($i = 0; $i -lt 3; $i++) {
+    $ax = Ver-Parts $a
+    $bx = Ver-Parts $b
+    for ($i = 0; $i -lt 4; $i++) {
         if ($ax[$i] -lt $bx[$i]) { return -1 }
         if ($ax[$i] -gt $bx[$i]) { return 1 }
     }
     return 0
 }
 try {
-    $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/version.txt"
-    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/version.txt" }
-    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md" }
+    $rel = ''
+    if ($Branch -eq 'beta') {
+        $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/version.txt" }
+    } else {
+        $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/version.txt" }
+    }
+    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/README.md" }
     $verFile = Join-Path $LuaDir 'vft\version.txt'
     $vfiDest = Join-Path $LuaDir 'vfi.lua'
     $old = ''
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
-    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] }
-    if ($rel -and (Test-Path $vfiDest) -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
+    if ($old -match '(\d+\.\d+\.\d+\.\d+)') { $old = $Matches[1] }
+    elseif ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] }
+    if (-not $Force -and $rel -and (Test-Path $vfiDest) -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
-    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
+    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$Branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
     if (-not (Test-Path $zip) -or ((Get-Item $zip).Length -lt 1000)) { throw 'zip too small' }
     & tar.exe -xf $zip -C $tmp
@@ -209,7 +219,7 @@ local function spawnCurlCheck(url)
         url))
 end
 
-local function startUpdateJob()
+local function startUpdateJob(force)
     if job then return false end
     local dest = luaDir()
     local tmp = tempDir()
@@ -227,10 +237,12 @@ local function startUpdateJob()
     M.err = ''
     M.note = 'updating…'
     os.execute(string.format(
-        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s"',
+        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s" -Branch "%s"%s',
         ps1:gsub('"', ''),
         dest:gsub('"', ''),
-        out:gsub('"', '')))
+        out:gsub('"', ''),
+        Chan.branch(),
+        force and ' -Force' or ''))
     return true
 end
 
@@ -242,7 +254,7 @@ end
 
 local function finishCheck()
     local body = job and readFile(job.out) or ''
-    local tryReadme = job and job.url ~= README_URL
+    local url = job and job.url or ''
     job = nil
     local ver = M.parseVer(body)
     if ver ~= '' then
@@ -251,8 +263,15 @@ local function finishCheck()
         M.note = (M.cmpVer(M.current(), ver) >= 0) and 'up to date' or ''
         return
     end
-    if tryReadme then
-        spawnCurlCheck(README_URL)
+    local cdn = Chan.cdn('lua/vft/version.txt')
+    local raw = Chan.raw('lua/vft/version.txt')
+    local readme = Chan.raw('README.md')
+    if url == cdn then
+        spawnCurlCheck(raw)
+        return
+    end
+    if url == raw then
+        spawnCurlCheck(readme)
         return
     end
     M.note = ''
@@ -260,7 +279,7 @@ local function finishCheck()
 end
 
 local function takeVer(result)
-    return M.parseVer(result) ~= '' and M.parseVer(result) or (result:match('(%d+%.%d+%.%d+)%s*$') or '')
+    return M.parseVer(result) ~= '' and M.parseVer(result) or (result:match('(%d+%.%d+%.%d+%.%d+)') or result:match('(%d+%.%d+%.%d+)%s*$') or '')
 end
 
 local function finishUpdate(result)
@@ -325,20 +344,22 @@ end
 
 function M.startCheck()
     if job then return end
-    spawnCurlCheck(VER_URL)
+    -- VF: beta Check uses GitHub raw — jsDelivr @branch can stay stale for hours.
+    local url = Chan.isBeta() and Chan.raw('lua/vft/version.txt') or Chan.cdn('lua/vft/version.txt')
+    spawnCurlCheck(url)
 end
 
 function M.startUpdate()
     if job then return end
-    startUpdateJob()
+    startUpdateJob(Chan.isBeta())
 end
 
 function M.runCli()
-    if not startUpdateJob() then
+    if not startUpdateJob(Chan.isBeta()) then
         print('\ag[VF]\ax \ar' .. (M.err ~= '' and M.err or 'update failed'))
         return
     end
-    print('\ag[VF]\ax overlaying ' .. M.REPO .. '@' .. M.BRANCH)
+    print('\ag[VF]\ax overlaying ' .. Chan.REPO .. '@' .. Chan.branch())
     while job do
         if mq.canDelay and mq.canDelay() then
             mq.delay(200)

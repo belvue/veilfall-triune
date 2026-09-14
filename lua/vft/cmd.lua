@@ -381,7 +381,7 @@ function M.install(runtime, api)
                     saveLoadout(true)
                     print(string.format('\ag[VF]\ax Max Melee Distance set to %d units.', ctrl.melee_dist))
                 else
-                    ctrl.ranged_dist = math.max(15, math.min(200, math.floor(val)))
+                    ctrl.ranged_dist = math.max(0, math.min(300, math.floor(val)))
                     saveLoadout(true)
                     print(string.format('\ag[VF]\ax Ranged Engagement Distance set to %d units.', ctrl.ranged_dist))
                 end
@@ -389,7 +389,7 @@ function M.install(runtime, api)
                 if ctrl.combat_style == 'Melee' then
                     print(string.format('\ag[VF]\ax Current Max Melee Distance: %d units. (usage: /vf range [5-50])', ctrl.melee_dist or 14))
                 else
-                    print(string.format('\ag[VF]\ax Current Ranged Distance: %d units. (usage: /vf range [15-200])', ctrl.ranged_dist or 40))
+                    print(string.format('\ag[VF]\ax Current Ranged Distance: %d units. (usage: /vf range [0-300])', ctrl.ranged_dist or 40))
                 end
             end
         elseif cmd == 'mover' then

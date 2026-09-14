@@ -7,6 +7,7 @@ local U = require('vft.mgr.util')
 local MeleeCat = require('vft.mgr.melee_catalog')
 local brand = require('vft.brand')
 local Up = require('vft.update')
+local Ranged = require('vft.ranged')
 
 local M = {}
 local theme = { colN = 0, varN = 0 }
@@ -217,8 +218,10 @@ local function editRow(row, id, opts)
             if not (S.hpBandEditable and S.hpBandEditable(row.type)) then
                 row.above = ''
             end
-            -- VF: AAs default blank Below (filler); gems/discs keep type default.
-            if row.gem == nil and row.via ~= 'disc' then
+            -- VF: Fade always seeds Below % (never AA filler blank). Other AAs stay blank.
+            if row.type == 'Fade' and S.defaultBelow then
+                row.below = tostring(S.defaultBelow('Fade'))
+            elseif row.gem == nil and row.via ~= 'disc' then
                 row.below = ''
                 row.above = ''
             elseif S.defaultBelow then
@@ -227,7 +230,7 @@ local function editRow(row, id, opts)
         end
     end
     if ImGui.IsItemHovered() then
-        setTooltip('Melee = MQ2Melee skill. Nuke = kill target. Tap = lifetap (my HP %, cast on mob, heal priority). DoT/Debuff = same on-mob gate. CC = Unmezzed Add. Heal = my HP %. HoT = my HP % and missing on buff/short. Cure = only this row; fires when a counter it strips (curse/poison/disease/corruption) is on your bar. Panic = my HP %. PetHeal/PetBuff = your pet. Burn = row checkbox.')
+        setTooltip('Melee = MQ2Melee skill. Nuke = kill target. Tap = lifetap (my HP %, cast on mob, heal priority). DoT/Debuff = same on-mob gate. CC = Unmezzed Add. Heal = my HP %. HoT = my HP % and missing on buff/short. Cure = only this row; fires when a counter it strips (curse/poison/disease/corruption) is on your bar. Panic = my HP %. Fade = Group dump at your Below HP % (not Main Tank). PetHeal/PetBuff = your pet. Burn = row checkbox.')
     end
 
     ImGui.TableNextColumn()
@@ -295,10 +298,10 @@ local function editRow(row, id, opts)
         if ImGui.IsItemHovered() then
             if not bandOk then
                 setTooltip('Above/Below not used for this Type (Buff / PetBuff / Summon / Cure).')
+            elseif row.type == 'Fade' or kind == 'self' then
+                setTooltip('Below % -- your HP. Fire when your HP is at or below this (Heal / Panic / HoT / Tap / Fade).')
             elseif row.gem == nil and row.via ~= 'disc' then
                 setTooltip('Below % — blank = combat-only filler (instant AA, enabled only). Set a value to gate on HP.')
-            elseif kind == 'self' then
-                setTooltip('Below % -- your HP. Fire when your HP is at or below this (Heal / Panic / HoT / Tap).')
             else
                 setTooltip('Below % -- target HP. Fire when mob/pet HP is at or below this (Nuke / DoT / Debuff / Melee / CC / PetHeal).')
             end
@@ -1553,6 +1556,50 @@ local function drawZones(state, actions)
     end
 end
 
+-- VF: same prefs as Combat Style. Group tab is a second view, not a second owner.
+local function drawRangedSliders(prefs, id, distLabel)
+    ImGui.SetNextItemWidth(160)
+    do
+        local v = ImGui.SliderInt('##' .. id .. 'Dist', prefs.ranged or 40, 0, 300)
+        prefs.ranged = tonumber(v) or prefs.ranged
+    end
+    ImGui.SameLine()
+    ImGui.Text(distLabel or 'Max distance')
+    if ImGui.IsItemHovered() then
+        setTooltip('How far to hold from the mob. 0 = no stand-off (melee).\n'
+            .. 'Reposition is /nav on the mesh, not stick or the keyboard.')
+    end
+    ImGui.SetNextItemWidth(160)
+    do
+        local v = ImGui.SliderInt('##' .. id .. 'Rubber', prefs.ranged_rubber or 20, 0, 50, '%d%%')
+        prefs.ranged_rubber = tonumber(v) or prefs.ranged_rubber
+    end
+    ImGui.SameLine()
+    ImGui.Text('Rubber')
+    if ImGui.IsItemHovered() then
+        setTooltip('Deviation around Max distance. 120 with 20% rubber holds 96–144\n'
+            .. 'without moving. Inside the band we shoot; outside we nav.')
+    end
+    local stand, lo, hi = Ranged.standBand(prefs.ranged, prefs.ranged_rubber)
+    if stand > 0 then
+        textMuted(string.format('Hold %d–%d (no reposition).', math.floor(lo + 0.5), math.floor(hi + 0.5)))
+    else
+        textMuted('Max 0 — melee close, no stand-off.')
+    end
+end
+
+-- VF: same prefs key as Combat. Shown next to Style when Ranged.
+local function drawAutofireBox(prefs, id)
+    local on = prefs.ranged_autofire ~= false
+    local nv = ImGui.Checkbox('Autofire##' .. id, on)
+    prefs.ranged_autofire = nv and true or false
+    if ImGui.IsItemHovered() then
+        setTooltip('On: /autofire only at stand-off. No /attack on, no /killthis.\n'
+            .. 'Off: park and face; spells and clickies still fire.\n'
+            .. 'Summoned or no mesh park falls back to melee.')
+    end
+end
+
 -- VF: Combat tab = how THIS character fights. Per-zone route editing lives in
 -- VF: the waypoints window (/vf wp); duplicating it here drifted out of sync.
 local function drawCombat(state)
@@ -1595,6 +1642,10 @@ local function drawCombat(state)
         setTooltip('Melee closes and swings. Ranged holds at Stand-off and autofires.\n'
             .. 'Spells are not a style -- they fire from the loadout in either one.')
     end
+    if (prefs.style or 'Melee') == 'Ranged' then
+        ImGui.SameLine()
+        drawAutofireBox(prefs, 'vfRangeAF')
+    end
 
     ImGui.SetNextItemWidth(160)
     if (prefs.style or 'Melee') == 'Melee' then
@@ -1609,15 +1660,7 @@ local function drawCombat(state)
                 .. 'than the server will actually land a hit.')
         end
     else
-        do
-            local v = ImGui.SliderInt('##vfRangeDist', prefs.ranged or 40, 15, 200)
-            prefs.ranged = tonumber(v) or prefs.ranged
-        end
-        ImGui.SameLine()
-        ImGui.Text('Stand-off')
-        if ImGui.IsItemHovered() then
-            setTooltip('Distance to hold while shooting.')
-        end
+        drawRangedSliders(prefs, 'vfRange', 'Stand-off')
     end
 
     prefs.enrage_hold = ImGui.Checkbox('Enrage hold##vfEnrageHold', prefs.enrage_hold ~= false)
@@ -1683,8 +1726,9 @@ local function drawCombat(state)
         ImGui.SameLine()
         ImGui.Text('Chase leash')
         if ImGui.IsItemHovered() then
-            setTooltip('Furthest we will chase a mob, and how far we will stray from a\n'
-                .. 'waypoint to do it. Per zone. Rush ignores it -- it only pulls the pin.')
+            setTooltip('Furthest Group/Rush will chase a mob, and how far we stray from a\n'
+                .. 'waypoint to do it. Per zone. Roam uses Look out to instead.\n'
+                .. 'Rush travel ignores it -- it only pulls the pin.')
         end
     else
         textMuted('Chase leash: zone in to set (per zone).')
@@ -1805,7 +1849,7 @@ local function drawCombat(state)
     ImGui.Text('Scanning')
     ImGui.Separator()
     if pack then
-        textMuted('Per zone. Rush ignores both -- it only pulls the pin.')
+        textMuted('Per zone. Roam hunts and keeps this far. Rush ignores both -- it only pulls the pin.')
         ImGui.SetNextItemWidth(160)
         do
             local scan = pack.scan or pack.wander or pack.range or 1500
@@ -1817,7 +1861,8 @@ local function drawCombat(state)
         ImGui.SameLine()
         ImGui.Text('Look out to')
         if ImGui.IsItemHovered() then
-            setTooltip('How far to look for something to pull.')
+            setTooltip('How far Roam looks for a pull, and how far it will keep and close.\n'
+                .. 'Chase leash is not this number.')
         end
 
         ImGui.SetNextItemWidth(160)
@@ -1952,9 +1997,27 @@ local function drawUpdatePanel()
     local rel = Up.display(Up.release)
     local cur = Up.display(Up.current())
     local busy = Up.busy()
+    local Chan = require('vft.updatechan')
     ImGui.Text('GitHub')
+    ImGui.SameLine(0, 8)
+    ImGui.TextDisabled(Chan.branch())
     ImGui.Text('Release: ' .. (rel ~= '' and rel or (Up.note == 'checking…' and 'checking…' or '—')))
     ImGui.Text('Current: ' .. (cur ~= '' and cur or '—'))
+    do
+        local beta = Chan.isBeta()
+        local newBeta = ImGui.Checkbox('Beta overlay##vfGitBeta', beta)
+        if newBeta ~= beta then
+            Chan.setBranch(newBeta and 'beta' or 'main')
+            Up.release = ''
+            Up.note = ''
+            Up.err = ''
+        end
+        if ImGui.IsItemHovered() then
+            setTooltip('On: Check uses GitHub branch beta; Update always overlays that zip.\n'
+                .. 'Off: main (stable), skip when local version >= GitHub.\n'
+                .. 'Snapshot lua/ and push beta, then Update — no version bump needed.')
+        end
+    end
     if busy then
         if Up.note ~= '' then textMuted(Up.note) end
     else
@@ -1969,8 +2032,9 @@ local function drawUpdatePanel()
             Up.startUpdate()
         end
         if ImGui.IsItemHovered() then
-            setTooltip('Overlay GitHub main: vf.lua, vfi.lua, and vft. Restarts VF and inventory.\n'
-                .. 'Does not write toon ini. Live edits that are not on main are overwritten.')
+            setTooltip('Overlay GitHub ' .. Chan.branch() .. ': vf.lua, vfi.lua, and vft. Restarts VF and inventory.\n'
+                .. 'Beta always copies even if the version number matches. Main still skips.\n'
+                .. 'Does not write toon ini. Live edits that are not on that branch are overwritten.')
         end
     end
     if Up.err ~= '' then
@@ -2053,6 +2117,38 @@ drawSettings = function(state)
     ImGui.EndGroup()
 end
 
+local function taggedFadeNames(state)
+    local names = {}
+    local seen = {}
+    local function add(n)
+        n = tostring(n or ''):gsub('^%s+', ''):gsub('%s+$', '')
+        if n == '' then return end
+        local key = n:lower()
+        if seen[key] then return end
+        seen[key] = true
+        names[#names + 1] = n
+    end
+    local function consider(name, rec)
+        if type(rec) ~= 'table' then return end
+        if rec.enabled == false then return end
+        if rec.pct == 0 then return end
+        local t = S.normalizeType(rec.cast_type or rec.t3_type or rec.type)
+        if t ~= 'Fade' then return end
+        local n = tonumber(rec.pct or rec.ui_pct)
+        if n == nil or n < 1 then n = (S.defaultBelow and S.defaultBelow('Fade')) or 40 end
+        add(string.format('%s @ %d%%', name, n))
+    end
+    local ce = state and state.charEntry
+    if type(ce) ~= 'table' then return names end
+    for _, g in pairs(ce.gems or {}) do
+        if type(g) == 'table' then consider(g.spell, g) end
+    end
+    for name, a in pairs(ce.aas or {}) do consider(name, a) end
+    for name, d in pairs(ce.discs or {}) do consider(name, d) end
+    for name, it in pairs(ce.items or {}) do consider(name, it) end
+    return names
+end
+
 drawGroup = function(state)
     local assist = state.assist
     if type(assist) ~= 'table' then
@@ -2131,6 +2227,44 @@ drawGroup = function(state)
     if type(prefs) ~= 'table' then
         prefs = S.defaultPrefs()
         state.prefs = prefs
+    end
+
+    ImGui.Dummy(0, 12)
+    ImGui.Text('Positioning')
+    textMuted('Same Style as Combat. Ranged parks on the nav mesh — not stick, not S.')
+    ImGui.SetNextItemWidth(160)
+    do
+        local styles = S.FIGHT_STYLES
+        local cur = 1
+        for i, name in ipairs(styles) do
+            if name == (prefs.style or 'Melee') then cur = i; break end
+        end
+        cur = comboIdx('##vfGrpFightStyle', cur, styles)
+        prefs.style = styles[cur] or prefs.style
+    end
+    ImGui.SameLine()
+    ImGui.Text('Style')
+    if ImGui.IsItemHovered() then
+        setTooltip('Melee closes and sticks. Ranged holds Max distance and autofires.\n'
+            .. 'If we cannot nav to a LoS park, we fall back to melee (stick).')
+    end
+    if (prefs.style or 'Melee') == 'Ranged' then
+        ImGui.SameLine()
+        drawAutofireBox(prefs, 'vfGrpRangeAF')
+        drawRangedSliders(prefs, 'vfGrpRange', 'Max distance')
+    end
+
+    ImGui.Dummy(0, 12)
+    ImGui.Text('Fade')
+    textMuted('Tag a Loadout row Type = Fade. Below % is your HP.')
+    textMuted('Fires in Group when you are that low. Skipped if you are the Main Tank.')
+    do
+        local tagged = taggedFadeNames(state)
+        if #tagged == 0 then
+            textMuted('No Fade row — set Type = Fade and a Below % on Loadout.')
+        else
+            textMuted('Fade: ' .. table.concat(tagged, ', '))
+        end
     end
 
     ImGui.Dummy(0, 12)

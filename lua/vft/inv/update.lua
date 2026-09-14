@@ -1,13 +1,15 @@
 -- VF: inv-only overlay. Copies vfi.lua + vft/inv/** + inv satellite modules from the same GitHub zip.
 -- VF: Check fetches lua/vft/inv/version.txt. No README fallback (that is suite).
 -- VF: Overlay copy list must match vfi.lua ensureInvTree.
+-- VF: Branch is vft.updatechan (config/vf_overlay.lua), same as suite.
 
 local mq = require('mq')
+local Chan = require('vft.updatechan')
+local Ver = require('vft.ver')
 
 local M = {}
 
-M.REPO = 'belvue/veilfall-triune'
-M.BRANCH = 'main'
+M.REPO = Chan.REPO
 M.release = ''
 M.note = ''
 M.err = ''
@@ -15,7 +17,10 @@ M.state = true
 
 local job = nil
 local currentCache, currentAt = '', -1
-local VER_URL = 'https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/inv/version.txt'
+
+function M.branch()
+    return Chan.branch()
+end
 
 -- VF: mq.luaDir can be relative 'lua'. Resolve against configDir, never PowerShell CWD.
 local function luaDir()
@@ -56,26 +61,15 @@ local function readFile(path)
 end
 
 function M.parseVer(body)
-    body = tostring(body or '')
-    if body == '' or body:find('404:', 1, true) or body:find('<', 1, true) then
-        return ''
-    end
-    local line = body:match('^%s*([^\r\n]+)') or ''
-    return line:match('(%d+%.%d+%.%d+)') or ''
+    return Ver.parse(body)
 end
 
 function M.parseParts(v)
-    local a, b, c = tostring(v or ''):match('(%d+)%.(%d+)%.(%d+)')
-    return tonumber(a) or 0, tonumber(b) or 0, tonumber(c) or 0
+    return Ver.parts(v)
 end
 
 function M.cmpVer(a, b)
-    local a1, a2, a3 = M.parseParts(a)
-    local b1, b2, b3 = M.parseParts(b)
-    if a1 ~= b1 then return (a1 < b1) and -1 or 1 end
-    if a2 ~= b2 then return (a2 < b2) and -1 or 1 end
-    if a3 ~= b3 then return (a3 < b3) and -1 or 1 end
-    return 0
+    return Ver.cmp(a, b)
 end
 
 function M.display(v)
@@ -104,7 +98,8 @@ local PS = [=[
 param(
     [Parameter(Mandatory = $true)][string]$LuaDir,
     [Parameter(Mandatory = $true)][string]$OutFile,
-    [switch]$Force
+    [switch]$Force,
+    [string]$Branch = 'main'
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -115,7 +110,7 @@ Write-Status 'run'
 $LuaDir = [IO.Path]::GetFullPath($LuaDir)
 if (-not (Test-Path $LuaDir)) { Write-Status "err lua dir missing"; exit 1 }
 $repo = 'belvue/veilfall-triune'
-$branch = 'main'
+if ($Branch -ne 'beta') { $Branch = 'main' }
 $token = $env:VF_GITHUB_TOKEN
 $headers = @('-sL', '-H', 'User-Agent: VF-Update')
 if ($token) { $headers += @('-H', "Authorization: Bearer $token") }
@@ -128,32 +123,47 @@ function Get-Ver([string]$url) {
     $raw = Get-Content $f -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { return '' }
     if ($raw -match '404:') { return '' }
+    if ($raw -match '(\d+\.\d+\.\d+\.\d+)') { return $Matches[1] }
     if ($raw -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
     return ''
 }
+function Ver-Parts([string]$v) {
+    if ($v -match '(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4])
+    }
+    if ($v -match '(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], 0)
+    }
+    return @(0, 0, 0, 0)
+}
 function Cmp-Ver([string]$a, [string]$b) {
-    $ax = @(0, 0, 0)
-    if ($a -match '(\d+)\.(\d+)\.(\d+)') { $ax = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    $bx = @(0, 0, 0)
-    if ($b -match '(\d+)\.(\d+)\.(\d+)') { $bx = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    for ($i = 0; $i -lt 3; $i++) {
+    $ax = Ver-Parts $a
+    $bx = Ver-Parts $b
+    for ($i = 0; $i -lt 4; $i++) {
         if ($ax[$i] -lt $bx[$i]) { return -1 }
         if ($ax[$i] -gt $bx[$i]) { return 1 }
     }
     return 0
 }
 try {
-    $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/inv/version.txt"
-    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt" }
+    $rel = ''
+    if ($Branch -eq 'beta') {
+        $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/inv/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/inv/version.txt" }
+    } else {
+        $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/inv/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/inv/version.txt" }
+    }
     if (-not $rel) { throw 'inv version missing' }
     $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
     $vfiDest = Join-Path $LuaDir 'vfi.lua'
     $old = '0.0.0'
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
-    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
+    if ($old -match '(\d+\.\d+\.\d+\.\d+)') { $old = $Matches[1] }
+    elseif ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
     if (-not $Force -and (Test-Path $vfiDest) -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
-    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
+    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$Branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
     if (-not (Test-Path $zip) -or ((Get-Item $zip).Length -lt 1000)) { throw 'zip too small' }
     & tar.exe -xf $zip -C $tmp
@@ -178,7 +188,7 @@ try {
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         Copy-Item $_.FullName $dest -Force
     }
-    foreach ($relName in @('vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
+    foreach ($relName in @('vft\ver.lua', 'vft\updatechan.lua', 'vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
         $from = Join-Path $luaSrc $relName
         if (Test-Path $from) {
             $dest = Join-Path $LuaDir $relName
@@ -202,13 +212,14 @@ try {
 local function spawnCurlCheck()
     local out = tempDir() .. '\\vfi-ver.txt'
     pcall(os.remove, out)
-    job = { mode = 'check', out = out, at = os.clock(), limit = 12 }
+    job = { mode = 'check', out = out, at = os.clock(), limit = 12,
+        url = Chan.isBeta() and Chan.raw('lua/vft/inv/version.txt') or Chan.cdn('lua/vft/inv/version.txt') }
     M.note = 'checking…'
     M.err = ''
     os.execute(string.format(
         'start "" /min curl.exe -sL --max-time 10 -A VF-Update -o "%s" "%s"',
         out:gsub('"', ''),
-        VER_URL))
+        job.url))
 end
 
 local function startUpdateJob(force)
@@ -229,10 +240,11 @@ local function startUpdateJob(force)
     M.err = ''
     M.note = 'updating…'
     os.execute(string.format(
-        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s"%s',
+        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s" -Branch "%s"%s',
         ps1:gsub('"', ''),
         dest:gsub('"', ''),
         out:gsub('"', ''),
+        Chan.branch(),
         force and ' -Force' or ''))
     return true
 end
@@ -245,6 +257,7 @@ end
 
 local function finishCheck()
     local body = job and readFile(job.out) or ''
+    local url = job and job.url or ''
     job = nil
     local ver = M.parseVer(body)
     if ver ~= '' then
@@ -253,12 +266,24 @@ local function finishCheck()
         M.note = (M.cmpVer(M.current(), ver) >= 0) and 'up to date' or ''
         return
     end
+    local cdn = Chan.cdn('lua/vft/inv/version.txt')
+    local raw = Chan.raw('lua/vft/inv/version.txt')
+    if url == cdn then
+        job = { mode = 'check', out = tempDir() .. '\\vfi-ver.txt', at = os.clock(), limit = 12, url = raw }
+        pcall(os.remove, job.out)
+        M.note = 'checking…'
+        os.execute(string.format(
+            'start "" /min curl.exe -sL --max-time 10 -A VF-Update -o "%s" "%s"',
+            job.out:gsub('"', ''),
+            raw))
+        return
+    end
     M.note = ''
     M.err = (body == '') and 'check timed out' or 'could not read GitHub inv version'
 end
 
 local function takeVer(result)
-    return M.parseVer(result) ~= '' and M.parseVer(result) or (result:match('(%d+%.%d+%.%d+)%s*$') or '')
+    return M.parseVer(result) ~= '' and M.parseVer(result) or (result:match('(%d+%.%d+%.%d+%.%d+)') or result:match('(%d+%.%d+%.%d+)%s*$') or '')
 end
 
 local function finishUpdate(result)
@@ -324,16 +349,16 @@ end
 
 function M.startUpdate()
     if job then return end
-    startUpdateJob()
+    startUpdateJob(Chan.isBeta())
 end
 
 function M.runCli(opts)
     opts = opts or {}
-    if not startUpdateJob(opts.force) then
+    if not startUpdateJob(opts.force or Chan.isBeta()) then
         print('\ag[VF:Inv]\ax \ar' .. (M.err ~= '' and M.err or 'update failed'))
         return false
     end
-    print('\ag[VF:Inv]\ax overlaying ' .. M.REPO .. '@' .. M.BRANCH)
+    print('\ag[VF:Inv]\ax overlaying ' .. Chan.REPO .. '@' .. Chan.branch())
     while job do
         mq.delay(200)
         M.tick()
@@ -358,6 +383,19 @@ function M.drawPanel()
     ImGui.Text('GitHub (inventory)')
     ImGui.Text('Release: ' .. (rel ~= '' and rel or (M.note == 'checking…' and 'checking…' or '—')))
     ImGui.Text('Current: ' .. (cur ~= '' and cur or '—'))
+    do
+        local beta = Chan.isBeta()
+        local newBeta = ImGui.Checkbox('Beta overlay##vfInvGitBeta', beta)
+        if newBeta ~= beta then
+            Chan.setBranch(newBeta and 'beta' or 'main')
+            M.release = ''
+            M.note = ''
+            M.err = ''
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('On: Check uses GitHub branch beta; Update always overlays that zip.\nOff: main (stable), skip when local version >= GitHub.\nSnapshot lua/ and push beta, then Update — no version bump needed.')
+        end
+    end
     if busy then
         if M.note ~= '' then ImGui.Text(M.note) end
     else
@@ -372,7 +410,8 @@ function M.drawPanel()
             M.startUpdate()
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Overlay vfi.lua, vft/inv, and inv satellite modules from GitHub main.\nDoes not write vf.lua.')
+            ImGui.SetTooltip('Overlay vfi.lua, vft/inv, and inv satellite modules from GitHub '
+                .. Chan.branch() .. '.\nBeta always copies even if the version number matches. Main still skips.\nDoes not write vf.lua.')
         end
     end
     if M.err ~= '' then

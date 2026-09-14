@@ -41,6 +41,8 @@ local function ensureInvTree()
         'vft/brand.lua',
         'vft/powersource.lua',
         'vft/toonini.lua',
+        'vft/ver.lua',
+        'vft/updatechan.lua',
         'vft/inv/app.lua',
         'vft/inv/boot.lua',
         'vft/inv/locks.lua',
@@ -56,6 +58,21 @@ local function ensureInvTree()
         return out
     end
 
+    local function overlayBranch()
+        local cfg = ''
+        pcall(function() cfg = tostring(mq.configDir or '') end)
+        if cfg == '' or cfg == 'NULL' then return 'main' end
+        local b = 'main'
+        pcall(function()
+            local chunk = loadfile(cfg:gsub('/', '\\'):gsub('\\+$', '') .. '\\vf_overlay.lua')
+            local t = chunk and chunk()
+            if type(t) == 'table' and tostring(t.branch or ''):lower() == 'beta' then
+                b = 'beta'
+            end
+        end)
+        return b
+    end
+
     local miss = missingList()
     if #miss == 0 then return true end
 
@@ -65,7 +82,8 @@ local function ensureInvTree()
 param(
     [Parameter(Mandatory = $true)][string]$LuaDir,
     [Parameter(Mandatory = $true)][string]$OutFile,
-    [switch]$Force
+    [switch]$Force,
+    [string]$Branch = 'main'
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -76,7 +94,7 @@ Write-Status 'run'
 $LuaDir = [IO.Path]::GetFullPath($LuaDir)
 if (-not (Test-Path $LuaDir)) { Write-Status "err lua dir missing"; exit 1 }
 $repo = 'belvue/veilfall-triune'
-$branch = 'main'
+if ($Branch -ne 'beta') { $Branch = 'main' }
 $token = $env:VF_GITHUB_TOKEN
 $headers = @('-sL', '-H', 'User-Agent: VF-Update')
 if ($token) { $headers += @('-H', "Authorization: Bearer $token") }
@@ -89,30 +107,39 @@ function Get-Ver([string]$url) {
     $raw = Get-Content $f -Raw -ErrorAction SilentlyContinue
     if (-not $raw) { return '' }
     if ($raw -match '404:') { return '' }
+    if ($raw -match '(\d+\.\d+\.\d+\.\d+)') { return $Matches[1] }
     if ($raw -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
     return ''
 }
+function Ver-Parts([string]$v) {
+    if ($v -match '(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4])
+    }
+    if ($v -match '(\d+)\.(\d+)\.(\d+)') {
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], 0)
+    }
+    return @(0, 0, 0, 0)
+}
 function Cmp-Ver([string]$a, [string]$b) {
-    $ax = @(0, 0, 0)
-    if ($a -match '(\d+)\.(\d+)\.(\d+)') { $ax = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    $bx = @(0, 0, 0)
-    if ($b -match '(\d+)\.(\d+)\.(\d+)') { $bx = @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) }
-    for ($i = 0; $i -lt 3; $i++) {
+    $ax = Ver-Parts $a
+    $bx = Ver-Parts $b
+    for ($i = 0; $i -lt 4; $i++) {
         if ($ax[$i] -lt $bx[$i]) { return -1 }
         if ($ax[$i] -gt $bx[$i]) { return 1 }
     }
     return 0
 }
 try {
-    $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt"
+    $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/inv/version.txt"
     if (-not $rel) { throw 'inv version missing' }
     $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
     $old = '0.0.0'
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
-    if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
+    if ($old -match '(\d+\.\d+\.\d+\.\d+)') { $old = $Matches[1] }
+    elseif ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
     if (-not $Force -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
-    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
+    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$Branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
     if (-not (Test-Path $zip) -or ((Get-Item $zip).Length -lt 1000)) { throw 'zip too small' }
     & tar.exe -xf $zip -C $tmp
@@ -136,7 +163,7 @@ try {
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         Copy-Item $_.FullName $dest -Force
     }
-    foreach ($relName in @('vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
+    foreach ($relName in @('vft\ver.lua', 'vft\updatechan.lua', 'vft\chat.lua', 'vft\brand.lua', 'vft\powersource.lua', 'vft\toonini.lua', 'vft\vf-mark.png', 'vft\vf-bag.png')) {
         $from = Join-Path $luaSrc $relName
         if (Test-Path $from) {
             $dest = Join-Path $LuaDir $relName
@@ -171,10 +198,11 @@ try {
     f:close()
 
     os.execute(string.format(
-        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s" -Force',
+        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s" -Branch "%s" -Force',
         ps1:gsub('"', ''),
         luaDir():gsub('"', ''),
-        out:gsub('"', '')))
+        out:gsub('"', ''),
+        overlayBranch()))
 
     local function readOut()
         local fh = io.open(out, 'r')

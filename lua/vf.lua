@@ -887,10 +887,8 @@ end
 runtime.canStickClose = function(id)
     if not id or id <= 0 then return false end
     if ctrl and ctrl.combat_style == 'Ranged' then
-        -- VF: this helper sits above the maxMeleeDistance local. Use the runtime slot.
-        local reach = 18
-        if runtime.maxMeleeDistance then reach = runtime.maxMeleeDistance(id) or 18 end
-        return distToId(id) <= reach
+        -- VF: stick only on summoned/no-park fallback. Stand-off never /stick the mob.
+        return runtime.meleeNow and runtime.meleeNow(id) or false
     end
     if runtime.stickHolding(id) then return true end
     return distToId(id) <= runtime.stickHandoff()
@@ -986,6 +984,14 @@ runtime.maxEngageDistance = function()
         end
     end
     return chase
+end
+
+-- VF: Roam hunt / keep / close ceiling is Scanning Look out to, not Chase leash.
+runtime.roamScanDist = function()
+    local n = tonumber(ctrl and ctrl.hunter_radius) or 1500
+    if n < 10 then n = 10 end
+    if n > 2000 then n = 2000 end
+    return n
 end
 
 -- VF: /stick hold <point> N% uw. N is stick_pct of MaxRangeTo. No mq.delay snaproll.
@@ -1106,6 +1112,7 @@ runtime.stickFollowTarget = function()
     pcall(function() tid = mq.TLO.Target.ID() or 0 end)
     if tid <= 0 or not isHostileTarget(tid) then return false end
     if runtime.manualFightConsent and not runtime.manualFightConsent() then return false end
+    if runtime.meleeNow and not runtime.meleeNow(tid) then return false end
     local swinging, inCs, onMe = false, false, false
     pcall(function() swinging = not not mq.TLO.Me.Combat() end)
     if runtime.engineInCombat then inCs = not not runtime.engineInCombat() end
@@ -1987,6 +1994,8 @@ local function applyEntry(e)
         if ctrl.stick_position == nil then ctrl.stick_position = 'Any' end
         if ctrl.stick_handoff == nil then ctrl.stick_handoff = runtime.STICK_HANDOFF or 120 end
         if ctrl.stick_pct == nil then ctrl.stick_pct = runtime.STICK_PCT or 30 end
+        if ctrl.ranged_rubber_pct == nil then ctrl.ranged_rubber_pct = 20 end
+        if ctrl.ranged_autofire == nil then ctrl.ranged_autofire = true end
         if ctrl.hunter_z_plane == nil then ctrl.hunter_z_plane = 15 end
         if ctrl.hunter_z == nil then ctrl.hunter_z = 75 end
         ctrl.maintain_buffs = true
@@ -3223,7 +3232,9 @@ local function setTarget(id)
     local success = mq.TLO.Target.ID() == id or fighting
     -- VF: keep /attack on a retarget only if the toggle was already down. CombatState is not consent.
     if wasCombat and isHostileTarget(id) then
-        if not mq.TLO.Me.Combat() then mq.cmd('/attack on') end
+        if (not runtime.meleeNow or runtime.meleeNow(id)) and not mq.TLO.Me.Combat() then
+            mq.cmd('/attack on')
+        end
     end
     return success
 end
@@ -3285,6 +3296,9 @@ end
 -- VF: Returns true if an action (spell, AA, disc, skill) is detrimental (offensive).
 local function isDetrimentalAction(name, targetToken, entry)
     if not name or name == '' then return false end
+    -- VF: Fade dumps hate on self — never wait for a swing.
+    if entry and runtime.castRole and runtime.castRole(entry) == 'Fade' then return false end
+    if entry and (entry.cast_type == 'Fade' or entry.t3_type == 'Fade') then return false end
     targetToken = tostring(targetToken or '')
 
     if targetToken:sub(1, 2) == 'E:' then return true end
@@ -4358,7 +4372,7 @@ local function fireItem(name, a, id)
     -- VF: Buff/heal clickies skip the swing gate — item name is not a Spell (spellClassInfo = det).
     local needSwing = role ~= 'Buff' and role ~= 'HoT' and role ~= 'Heal'
         and role ~= 'Cure' and role ~= 'Panic' and role ~= 'Summon'
-        and role ~= 'PetBuff' and role ~= 'PetHeal'
+        and role ~= 'PetBuff' and role ~= 'PetHeal' and role ~= 'Fade'
     if needSwing and (ctrl.combat_style or 'Melee') == 'Melee' then
         local swinging = false
         pcall(function() swinging = not not mq.TLO.Me.Combat() end)
@@ -4524,18 +4538,22 @@ local function moveToward(id, dist, followOnly)
     end
     local d = distToId(id)
     -- VF: Manual bubble unless this is the attack-commit chase (then Chase leash).
+    -- VF: Roam closes out to Look out to; Chase is Group/Rush stray, not the hunt.
     local maxNav = (ctrl and ctrl.xtar_nav_dist) or 150
+    local roamClose = ctrl and ctrl.running and ctrl.mode == 'Roam'
+    if roamClose then
+        maxNav = (runtime.roamScanDist and runtime.roamScanDist()) or (ctrl.hunter_radius or 1500)
+    end
     local commitChase = runtime.manualCommitId and runtime.manualCommitId == id
     if not commitChase and ((not ctrl.running) or (ctrl and ctrl.mode == 'Manual')) then
         maxNav = math.min(maxNav, runtime.rushNear or 80)
     end
     if runtime.spawnWantsFight and runtime.spawnWantsFight(id) and d > maxNav then
-        -- VF: Chase is a hard ceiling on the combat approach. Refusing in silence
-        -- VF: reads in game as "it just stands there and never closes".
+        -- VF: Ceiling on the combat approach. Refusing in silence reads as a freeze.
         if (os.clock() - (pursuit.chaseWarnAt or 0)) > 5 then
             pursuit.chaseWarnAt = os.clock()
-            local label = commitChase and 'Chase' or (
-                ((not ctrl.running) or (ctrl and ctrl.mode == 'Manual')) and 'Manual near' or 'Chase')
+            local label = roamClose and 'Look out to' or (commitChase and 'Chase' or (
+                ((not ctrl.running) or (ctrl and ctrl.mode == 'Manual')) and 'Manual near' or 'Chase'))
             print(string.format(
                 '\ay[VF]\ax #%d is %.0f out, past %s %d -- not closing.',
                 id, d, label, maxNav))
@@ -4638,6 +4656,7 @@ local function moveToward(id, dist, followOnly)
     if not followOnly and d <= runtime.stickHandoff() then
         -- VF: Ranged past melee reach must nav to ranged_dist. /stick 70% is the face-bow.
         local bowHold = ctrl and ctrl.combat_style == 'Ranged' and d > maxMeleeDistance(id)
+            and not (runtime.meleeNow and runtime.meleeNow(id))
         if losOk and not bowHold then
             runtime.stickPursue(id, targetDist)
             return false
@@ -4687,41 +4706,7 @@ local function moveToward(id, dist, followOnly)
     return false
 end
 
--- VF: bow in the face: never /attack on the bow line.
--- VF: Manual/Pause: no autofire / melee swap until you armed the fight.
-runtime.rangedFightTick = function(tid, mayClose)
-    tid = tonumber(tid) or 0
-    if tid <= 0 then return end
-    if runtime.manualFightConsent and not runtime.manualFightConsent() then return end
-    if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-    local d = distToId(tid)
-    local stand = (ctrl and tonumber(ctrl.ranged_dist)) or 40
-    local reach = maxMeleeDistance(tid)
-    if reach < 8 then reach = 8 end
-    if d <= reach then
-        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-        if runtime.ensureAttack then runtime.ensureAttack(tid) end
-        -- VF: stickFollowTarget waits on Me.Combat -- first swap tick would not stick.
-        if runtime.stickPursue then runtime.stickPursue(tid) end
-        return
-    end
-    if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-    -- VF: bow heading is ours. MQ2Melee facing is a melee rail and stays off.
-    local now = os.clock()
-    if (now - (runtime.rangedFaceAt or 0)) > 0.35 then
-        runtime.rangedFaceAt = now
-        mq.cmdf('/face fast id %d', tid)
-    end
-    -- VF: slack so Rush/Group moveToward and this tick do not re-nav at stand+1.
-    if d > stand + 4 then
-        if mayClose and not (runtime.castingMustStand and runtime.castingMustStand()) then
-            moveToward(tid, stand)
-        end
-        return
-    end
-    stopMoving()
-    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-end
+-- VF: rangedFightTick lives in vft/ranged.lua (rubber band, /nav loc, melee fallback).
 
 -- VF: a summon yanks us off-route mid-travel. Without this TA keeps navving back
 -- VF: to the pin and issuing /attack off every tick while the mob beats on us.
@@ -5056,12 +5041,22 @@ runtime.inFight = function()
     return (tonumber(runtime._assistId) or 0) > 0
 end
 
+-- VF: Melee style, or Ranged latched to melee (summoned / no park) on this id.
+runtime.meleeNow = function(id)
+    if (ctrl.combat_style or 'Melee') == 'Melee' then return true end
+    id = tonumber(id) or 0
+    if id <= 0 then
+        pcall(function() id = mq.TLO.Target.ID() or 0 end)
+    end
+    return id > 0 and runtime.rangedMeleeFallback and runtime.rangedMeleeFallback(id)
+end
+
 runtime.mayClose = function(id)
     id = tonumber(id) or 0
     local assist = tonumber(runtime._assistId) or 0
     if assist <= 0 then return false end
     if id > 0 and id ~= assist then return false end
-    if (ctrl.combat_style or 'Melee') ~= 'Melee' then return false end
+    if not runtime.meleeNow(id > 0 and id or assist) then return false end
     if runtime.castingMustStand and runtime.castingMustStand() then return false end
     if ctrl.mode == 'Manual' or not ctrl.running then
         return (tonumber(runtime.manualCommitId) or 0) == assist
@@ -5140,6 +5135,9 @@ runtime.attackReleaseOk = function()
     -- VF: auto-hater list means an absent id proves nothing, so this only ever holds.
     if not held and runtime.xtargetHaters then
         local band = (ctrl and tonumber(ctrl.xtar_nav_dist)) or 150
+        if ctrl and ctrl.mode == 'Roam' and runtime.roamScanDist then
+            band = runtime.roamScanDist()
+        end
         for id in pairs(runtime.xtargetHaters()) do
             if isSpawnAlive(id) and distToId(id) <= band then
                 held = true
@@ -5162,7 +5160,7 @@ end
 -- VF: /attack on this id if in reach or on-me. No acquire. No delay.
 runtime.ensureAttack = function(id)
     if mq.TLO.Me.Dead() then return false end
-    if (ctrl.combat_style or 'Melee') ~= 'Melee' then return false end
+    if not runtime.meleeNow(id) then return false end
     if runtime.meleeEnrageHold and runtime.meleeEnrageHold() then return false end
     if not runtime.swingTargetLive(id) then return false end
     if not runtime.swingAllowed(id) then return false end
@@ -5227,7 +5225,8 @@ end
 -- VF: Pulsed every main-loop delay (~150ms) — combatTick alone is 0.4s and misses stand→attack.
 runtime.pulseMeleeAttack = function()
     if mq.TLO.Me.Dead() then return false end
-    if (ctrl.combat_style or 'Melee') ~= 'Melee' then return false end
+    if runtime.groupFadeHold and runtime.groupFadeHold() then return false end
+    if not runtime.meleeNow() then return false end
     if runtime.meleeEnrageHold and runtime.meleeEnrageHold() then return false end
     -- VF: Rush/ignore transit owns feet — unless Manual is already in the pack.
     if runtime.pullerRushing and runtime.pullerRushing() then return false end
@@ -5339,8 +5338,8 @@ local function findRoamTarget(searchRadius, searchMaxZ, minLevel, maxLevel)
     runtime.meshPathFails = 0
 
     -- VF: 1. Already in a fight nearby — take that over a fresh hunt pick.
-    local maxChase = (ctrl and ctrl.xtar_nav_dist) or 150
-    local fightId = runtime.closestThreat and runtime.closestThreat(maxChase)
+    local nearFight = (runtime.roamScanDist and runtime.roamScanDist()) or (ctrl.hunter_radius or 1500)
+    local fightId = runtime.closestThreat and runtime.closestThreat(nearFight)
     if fightId then
         local fs = mq.TLO.Spawn(fightId)
         if fs and fs() then
@@ -5655,8 +5654,12 @@ runtime.whyFight = function()
 
     -- VF: ensureAttack order -- Dead, style, enrage, live, allowed, reach, LoS, sit.
     if dead then atk = take(atk, 'Me.Dead') end
-    if style ~= 'Melee' then
-        atk = take(atk, 'combat_style=' .. tostring(style) .. ' (ensureAttack is Melee-only)')
+    if not (runtime.meleeNow and runtime.meleeNow(tid)) then
+        if style == 'Ranged' then
+            atk = take(atk, 'combat_style=Ranged (autofire; melee only if summoned/no park)')
+        else
+            atk = take(atk, 'combat_style=' .. tostring(style) .. ' (ensureAttack is Melee-only)')
+        end
     end
     if runtime.meleeEnrageHold and runtime.meleeEnrageHold() then
         atk = take(atk, 'meleeEnrageHold (enrage/infuriate)')
@@ -5941,6 +5944,10 @@ local function retargetThreat()
 
     local fightBand = runtime.stickHandoff and runtime.stickHandoff() or 120
     local leash = (ctrl and tonumber(ctrl.xtar_nav_dist)) or 150
+    -- VF: Roam keeps a pull out to Look out to. Chase leash is not that radius.
+    if ctrl and ctrl.mode == 'Roam' and runtime.roamScanDist then
+        leash = runtime.roamScanDist()
+    end
     local cur = mq.TLO.Target
     local curId = 0
     local curDist = 999
@@ -5990,8 +5997,9 @@ local function retargetThreat()
         pursuit.lastNavTargetId = 0
         mq.cmd('/target clear')
         if runtime.manualCommitId == curId then runtime.manualCommitId = 0 end
-        local msg = string.format('threat drop #%d — past chase leash %.0f (dist %.0f)',
-            curId, leash, curDist)
+        local why = (ctrl and ctrl.mode == 'Roam') and 'look-out' or 'chase leash'
+        local msg = string.format('threat drop #%d — past %s %.0f (dist %.0f)',
+            curId, why, leash, curDist)
         if runtime.chat then
             runtime.chat.debug('vft', 'retargetThreat', msg)
         end
@@ -6026,6 +6034,7 @@ fullStop = function()
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
     pursuit.wanderLoc = nil
+    if runtime.rangedReset then runtime.rangedReset() end
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
     runtime.manualFightArmed = false
@@ -6085,6 +6094,7 @@ onZoned = function()
     pursuit.unreachableIds = {}
     pursuit.id = 0
     pursuit.wanderLoc = nil
+    if runtime.rangedReset then runtime.rangedReset() end
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
     runtime.discExpires = {}
@@ -6520,6 +6530,7 @@ runtime.isUnreachable = isUnreachable
 
 require('vft.modes.group').install(runtime, {
     ctrl                 = function() return ctrl end,
+    loadout              = function() return loadout end,
     distToId             = distToId,
     setTarget            = setTarget,
     moveToward           = moveToward,
@@ -6533,6 +6544,18 @@ require('vft.modes.group').install(runtime, {
     isGroupOrRaidMember  = isGroupOrRaidMember,
     isSpawnAlive         = isSpawnAlive,
     claimMover           = runtime.claimMover,
+})
+
+require('vft.ranged').install(runtime, {
+    ctrl                 = function() return ctrl end,
+    pursuit              = pursuit,
+    distToId             = distToId,
+    distToLoc            = distToLoc,
+    hasLoS               = hasLoS,
+    moveToward           = moveToward,
+    moveTowardLoc        = moveTowardLoc,
+    stopMoving           = stopMoving,
+    maxMeleeDistance     = maxMeleeDistance,
 })
 
 require('vft.modes.roam').install(runtime, {
@@ -6908,8 +6931,14 @@ local function combatTick()
     local tid = mq.TLO.Target.ID() or 0
     -- VF: Roam only -- see desiredRange.
     local isPullStandBack = (ctrl.mode == 'Roam' and ctrl.pull_stand_back and ctrl.pull_style ~= 'Facepull')
-    -- VF: maySwing is ensureAttack. Melee close is AssistOn, not moveToward.
-    if style == 'Melee' then
+    -- VF: Fade dump — do not re-swing / autofire for a beat so hate can land on the tank.
+    if runtime.groupFadeHold and runtime.groupFadeHold() then
+        if mq.TLO.Me.Combat() and runtime.attackReleaseOk and runtime.attackReleaseOk() then
+            mq.cmd('/attack off')
+        end
+        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+    elseif style == 'Melee' then
+        -- VF: maySwing is ensureAttack. Melee close is AssistOn, not moveToward.
         if not isPullStandBack then
             if haveNPC and autoAttackOk and runtime.inFight() then
                 if runtime.assistOn then
@@ -7097,8 +7126,7 @@ local function combatTick()
         local tid = mq.TLO.Target.ID() or 0
         local d = (tid > 0) and distToId(tid) or 999
         local maxReach = (tid > 0) and maxMeleeDistance(tid) or ((ctrl and ctrl.melee_dist) or MELEE_RANGE)
-        if ctrl and ctrl.combat_style == 'Melee' and haveNPC
-            and runtime.inFight() then
+        if haveNPC and runtime.inFight() and runtime.meleeNow and runtime.meleeNow(tid) then
             if d <= maxReach then
                 if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
             elseif runtime.mayClose(tid) and tid > 0 then
@@ -7191,8 +7219,8 @@ local function isSelfHealEntry(entry, spellName, explicitMode)
     if entry.ooc_heal then return true end
     if explicitMode then return false end
     local role = runtime.castRole and runtime.castRole(entry) or nil
-    -- VF: Panic is combat survival only ? never OOC top-off / selfHealCast.
-    if role == 'Panic' then return false end
+    -- VF: Panic / Fade are combat-only — never OOC top-off / selfHealCast.
+    if role == 'Panic' or role == 'Fade' then return false end
     if role == 'Buff' or role == 'PetBuff' or role == 'Summon' then
         return false
     end
@@ -7201,7 +7229,7 @@ local function isSelfHealEntry(entry, spellName, explicitMode)
         if U.baseTok(entry.target) == 'Myself' then return true end
     end
     local typ = entry.cast_type or entry.t3_type
-    if typ == 'Panic' then return false end
+    if typ == 'Panic' or typ == 'Fade' then return false end
     if typ == 'Buff' or typ == 'PetBuff' or typ == 'Summon' then
         return false
     end

@@ -6,10 +6,10 @@ local U = require('vft.mgr.util')
 local NUM_GEMS = 12
 
 -- VF: Role tags for rotate buckets. docs/COMBAT_TICK_IDEAL.md
--- VF: Burn is burn_only checkbox, not a Type. CC = mez/add control, not kill target.
+-- VF: Fade is Group aggro dump only — not a bucket, not a heal. Burn is burn_only, not a Type.
 local TYPES = {
     'Melee', 'Nuke', 'DoT', 'Debuff', 'CC',
-    'Heal', 'Tap', 'HoT', 'Cure', 'Panic',
+    'Heal', 'Tap', 'HoT', 'Cure', 'Panic', 'Fade',
     'Buff', 'Summon', 'PetHeal', 'PetBuff',
 }
 local TYPE_SET = {}
@@ -61,7 +61,7 @@ local function defaultCombat(typ)
     if typ == 'Buff' or typ == 'PetBuff' or typ == 'Summon' then
         return 'Out of Combat'
     end
-    -- VF: Heal / HoT / Cure / Panic: Always (HoT = HP% + missing on buff/short).
+    -- VF: Heal / HoT / Cure / Panic / Fade: Always (HoT = HP% + missing on buff/short).
     return 'Always'
 end
 
@@ -88,6 +88,7 @@ end
 
 local function defaultBelow(typ)
     if typ == 'Panic' then return 20 end
+    if typ == 'Fade' then return 40 end
     if typ == 'Heal' or typ == 'HoT' or typ == 'PetHeal' or typ == 'Tap' then return 75 end
     if typ == 'Cure' then return 100 end
     if typ == 'Melee' or typ == 'DoT' or typ == 'Nuke' or typ == 'Debuff' or typ == 'CC' then
@@ -111,7 +112,7 @@ end
 local function hpBandKind(typ)
     typ = normalizeType(typ) or typ
     -- VF: Tap = my HP band, cast on mob (mapType sets E: Current Target).
-    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' or typ == 'Tap' then return 'self' end
+    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' or typ == 'Tap' or typ == 'Fade' then return 'self' end
     if typ == 'Nuke' or typ == 'DoT' or typ == 'Debuff' or typ == 'Melee'
         or typ == 'CC' or typ == 'PetHeal' then
         return 'target'
@@ -130,7 +131,7 @@ local function mapType(typ)
     typ = normalizeType(typ) or typ
     if typ == 'Buff' then return 'missing buff', 'F: Myself' end
     if typ == 'PetBuff' then return 'missing buff', 'F: Pet' end
-    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' then return 'my HP <=', 'F: Myself' end
+    if typ == 'Heal' or typ == 'Panic' or typ == 'HoT' or typ == 'Fade' then return 'my HP <=', 'F: Myself' end
     if typ == 'Tap' then return 'my HP <=', 'E: Current Target' end
     if typ == 'PetHeal' then return 'HP <=', 'F: Pet' end
     if typ == 'Cure' then return 'has Poison/Disease', 'F: Myself' end
@@ -394,6 +395,19 @@ end
 
 local function belowFromEntry(entry, typ, kind)
     -- VF: kind 'aa'|'disc'|'item'|nil â€” discs/AAs/items default blank HP%; gems use type default.
+    -- VF: Fade always owns a Below % (default 40); never snip it as filler.
+    if normalizeType(typ) == 'Fade' then
+        if not entry then return tostring(defaultBelow('Fade')) end
+        local pct = tonumber(entry.pct)
+        local stash = tonumber(entry.ui_pct or entry.t3_pct)
+        if pct == 0 then
+            if stash and stash > 0 then return tostring(stash) end
+            return tostring(defaultBelow('Fade'))
+        end
+        if pct then return tostring(pct) end
+        if stash then return tostring(stash) end
+        return tostring(defaultBelow('Fade'))
+    end
     if kind == 'aa' or kind == 'disc' or kind == 'item' then
         if not entry then return '' end
         local pct = tonumber(entry.pct)
@@ -520,6 +534,8 @@ local function thresholdFor(row)
         if n > 100 then n = 100 end
         return n
     end
+    -- VF: Fade is never an ungated filler — blank Below is the type default (40).
+    if normalizeType(row and row.type) == 'Fade' then return defaultBelow('Fade') end
     -- VF: blank Below on AAs/discs = ungated (pct nil). Gems keep type default.
     if isAaUiRow(row) or row.via == 'disc' then return nil end
     return defaultBelow(row.type)
@@ -1092,6 +1108,7 @@ local function writeAssistToControl(control, assist)
 end
 
 -- VF: Group tab â€” approved PC whitelist for auto-accept + stay in Group mode.
+-- VF: Group Fade is a Loadout Type, not a Group-tab name list.
 local function defaultGroupTrust()
     return {
         auto_accept = true,
@@ -1131,6 +1148,7 @@ local function writeGroupTrustToControl(control, trust)
     trust = copyGroupTrust(trust)
     control.group_auto_accept = trust.auto_accept and true or false
     control.group_stay = trust.stay and true or false
+    control.group_fade = nil
     control.group_approved = {}
     for i, n in ipairs(trust.names) do
         control.group_approved[i] = n
@@ -1154,6 +1172,8 @@ local function defaultPrefs()
         style = 'Melee',
         melee = 14,
         ranged = 40,
+        ranged_rubber = 20,
+        ranged_autofire = true,
         stick_position = 'Any',
         stick_handoff = 120,
         stick_pct = 30,
@@ -1199,7 +1219,9 @@ local function copyPrefs(src)
     local style = src.combat_style or src.style
     if FIGHT_STYLE_SET[style] then p.style = style end
     p.melee = clamp(src.melee_dist or src.melee, 5, 50, p.melee)
-    p.ranged = clamp(src.ranged_dist or src.ranged, 15, 200, p.ranged)
+    p.ranged = clamp(src.ranged_dist or src.ranged, 0, 300, p.ranged)
+    p.ranged_rubber = clamp(src.ranged_rubber_pct or src.ranged_rubber, 0, 50, p.ranged_rubber)
+    p.ranged_autofire = (src.ranged_autofire ~= false)
     local spos = src.stick_position
     if STICK_POSITION_SET[spos] then p.stick_position = spos end
     p.stick_handoff = clamp(src.stick_handoff, 40, 200, p.stick_handoff)
@@ -1446,6 +1468,8 @@ local function writePrefsToControl(control, prefs)
     control.combat_style = prefs.style
     control.melee_dist = prefs.melee
     control.ranged_dist = prefs.ranged
+    control.ranged_rubber_pct = prefs.ranged_rubber
+    control.ranged_autofire = prefs.ranged_autofire ~= false
     control.stick_position = prefs.stick_position
     control.stick_handoff = prefs.stick_handoff
     control.stick_pct = prefs.stick_pct
