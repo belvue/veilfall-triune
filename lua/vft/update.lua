@@ -1,4 +1,5 @@
 -- VF: overlay GitHub main onto mq.luaDir. Manager Settings Check/Update (suite).
+-- VF: Suite overlay is vf.lua + vfi.lua + vft/**. Inv overlay is inventory-only.
 -- VF: Check fetches lua/vft/version.txt (0.N.N). Never on draw. README is fallback.
 
 local mq = require('mq')
@@ -16,14 +17,29 @@ local currentCache, currentAt = '', -1
 local VER_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/version.txt'
 local README_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md'
 
+-- VF: mq.luaDir can be relative 'lua'. Resolve against configDir, never PowerShell CWD.
 local function luaDir()
-    local dir = ''
-    pcall(function() dir = tostring(mq.luaDir or '') end)
-    if dir == '' or dir == 'NULL' then
-        dir = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
-        dir = dir:gsub('[/\\]vft[/\\]?$', '')
+    local function norm(p)
+        return tostring(p or ''):gsub('/', '\\'):gsub('\\+$', '')
     end
-    return dir:gsub('/', '\\'):gsub('\\+$', '')
+    local function isAbs(p)
+        p = norm(p)
+        return p:match('^[%a]:') ~= nil or p:match('^\\\\') ~= nil
+    end
+    local dir, cfg = '', ''
+    pcall(function() dir = tostring(mq.luaDir or '') end)
+    pcall(function() cfg = tostring(mq.configDir or '') end)
+    if dir == 'NULL' then dir = '' end
+    if cfg == 'NULL' then cfg = '' end
+    dir, cfg = norm(dir), norm(cfg)
+    if isAbs(dir) then return dir end
+    if cfg ~= '' then
+        local root = cfg:gsub('\\config$', '')
+        local rel = (dir ~= '' and dir or 'lua')
+        return norm(root .. '\\' .. rel)
+    end
+    local script = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
+    return norm(script):gsub('\\vft$', '')
 end
 
 local function tempDir()
@@ -127,10 +143,11 @@ try {
     $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/version.txt"
     if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/README.md" }
     $verFile = Join-Path $LuaDir 'vft\version.txt'
+    $vfiDest = Join-Path $LuaDir 'vfi.lua'
     $old = ''
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
     if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] }
-    if ($rel -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
+    if ($rel -and (Test-Path $vfiDest) -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
     & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
@@ -140,11 +157,13 @@ try {
     $srcRoot = Get-ChildItem $tmp -Directory | Where-Object { $_.Name -like 'veilfall-triune-*' } | Select-Object -First 1
     if (-not $srcRoot) { throw 'zip layout' }
     $luaSrc = Join-Path $srcRoot.FullName 'lua'
-    if (-not (Test-Path (Join-Path $luaSrc 'vf.lua'))) { throw 'zip has no lua/vf.lua' }
-    foreach ($name in @('vf.lua', 'vfi.lua')) {
-        $from = Join-Path $luaSrc $name
-        if (Test-Path $from) { Copy-Item $from (Join-Path $LuaDir $name) -Force }
-    }
+    $vfSrc = Join-Path $luaSrc 'vf.lua'
+    $vfiSrc = Join-Path $luaSrc 'vfi.lua'
+    if (-not (Test-Path $vfSrc)) { throw 'zip has no lua/vf.lua' }
+    if (-not (Test-Path $vfiSrc)) { throw 'zip has no lua/vfi.lua' }
+    Copy-Item $vfSrc (Join-Path $LuaDir 'vf.lua') -Force
+    Copy-Item $vfiSrc $vfiDest -Force
+    if (-not (Test-Path $vfiDest)) { throw 'vfi.lua copy failed' }
     $vftSrc = Join-Path $luaSrc 'vft'
     $vftDst = Join-Path $LuaDir 'vft'
     if (Test-Path $vftSrc) {
@@ -216,7 +235,7 @@ end
 
 function M.reloadVf()
     pcall(function()
-        mq.cmd('/multiline ; /vf pause; /lua stop vf; /timed 10 /lua run vf')
+        mq.cmd('/multiline ; /vf pause; /lua stop vfi; /lua stop vft/inv; /lua stop vf; /timed 10 /lua run vf; /timed 20 /lua run vfi')
     end)
 end
 

@@ -1969,7 +1969,7 @@ local function drawUpdatePanel()
             Up.startUpdate()
         end
         if ImGui.IsItemHovered() then
-            setTooltip('Overlay GitHub main onto this lua folder, then restart VF.\n'
+            setTooltip('Overlay GitHub main: vf.lua, vfi.lua, and vft. Restarts VF and inventory.\n'
                 .. 'Does not write toon ini. Live edits that are not on main are overwritten.')
         end
     end

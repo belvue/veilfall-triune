@@ -17,14 +17,29 @@ local job = nil
 local currentCache, currentAt = '', -1
 local VER_URL = 'https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt'
 
+-- VF: mq.luaDir can be relative 'lua'. Resolve against configDir, never PowerShell CWD.
 local function luaDir()
-    local dir = ''
-    pcall(function() dir = tostring(mq.luaDir or '') end)
-    if dir == '' or dir == 'NULL' then
-        dir = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
-        dir = dir:gsub('[/\\]vft[/\\]inv[/\\]?$', '')
+    local function norm(p)
+        return tostring(p or ''):gsub('/', '\\'):gsub('\\+$', '')
     end
-    return dir:gsub('/', '\\'):gsub('\\+$', '')
+    local function isAbs(p)
+        p = norm(p)
+        return p:match('^[%a]:') ~= nil or p:match('^\\\\') ~= nil
+    end
+    local dir, cfg = '', ''
+    pcall(function() dir = tostring(mq.luaDir or '') end)
+    pcall(function() cfg = tostring(mq.configDir or '') end)
+    if dir == 'NULL' then dir = '' end
+    if cfg == 'NULL' then cfg = '' end
+    dir, cfg = norm(dir), norm(cfg)
+    if isAbs(dir) then return dir end
+    if cfg ~= '' then
+        local root = cfg:gsub('\\config$', '')
+        local rel = (dir ~= '' and dir or 'lua')
+        return norm(root .. '\\' .. rel)
+    end
+    local script = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
+    return norm(script):gsub('\\vft\\inv$', ''):gsub('\\vft$', '')
 end
 
 local function tempDir()
@@ -131,10 +146,11 @@ try {
     $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt"
     if (-not $rel) { throw 'inv version missing' }
     $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
+    $vfiDest = Join-Path $LuaDir 'vfi.lua'
     $old = '0.0.0'
     if (Test-Path $verFile) { $old = (Get-Content $verFile -Raw).Trim() }
     if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
-    if (-not $Force -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
+    if (-not $Force -and (Test-Path $vfiDest) -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
     & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
@@ -146,7 +162,8 @@ try {
     $luaSrc = Join-Path $srcRoot.FullName 'lua'
     $vfi = Join-Path $luaSrc 'vfi.lua'
     if (-not (Test-Path $vfi)) { throw 'zip has no lua/vfi.lua' }
-    Copy-Item $vfi (Join-Path $LuaDir 'vfi.lua') -Force
+    Copy-Item $vfi $vfiDest -Force
+    if (-not (Test-Path $vfiDest)) { throw 'vfi.lua copy failed' }
     $invSrc = Join-Path $luaSrc 'vft\inv'
     $invDst = Join-Path $LuaDir 'vft\inv'
     if (-not (Test-Path $invSrc)) { throw 'zip has no lua/vft/inv' }

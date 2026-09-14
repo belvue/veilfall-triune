@@ -7,13 +7,27 @@ local mq = require('mq')
 -- VF: Overlay copy list must match vft/inv/update.lua.
 local function ensureInvTree()
     local function luaDir()
-        local dir = ''
-        pcall(function() dir = tostring(mq.luaDir or '') end)
-        if dir == '' or dir == 'NULL' then
-            dir = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
-            dir = dir:gsub('[/\\]vfi%.lua$', '')
+        local function norm(p)
+            return tostring(p or ''):gsub('/', '\\'):gsub('\\+$', '')
         end
-        return dir:gsub('/', '\\'):gsub('\\+$', '')
+        local function isAbs(p)
+            p = norm(p)
+            return p:match('^[%a]:') ~= nil or p:match('^\\\\') ~= nil
+        end
+        local dir, cfg = '', ''
+        pcall(function() dir = tostring(mq.luaDir or '') end)
+        pcall(function() cfg = tostring(mq.configDir or '') end)
+        if dir == 'NULL' then dir = '' end
+        if cfg == 'NULL' then cfg = '' end
+        dir, cfg = norm(dir), norm(cfg)
+        if isAbs(dir) then return dir end
+        if cfg ~= '' then
+            local root = cfg:gsub('\\config$', '')
+            local rel = (dir ~= '' and dir or 'lua')
+            return norm(root .. '\\' .. rel)
+        end
+        local script = debug.getinfo(1, 'S').source:match('@?(.*[/\\])') or './'
+        return norm(script):gsub('\\vfi%.lua$', '')
     end
 
     local function has(rel)
