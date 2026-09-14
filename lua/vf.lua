@@ -1987,6 +1987,7 @@ local function applyEntry(e)
         if ctrl.stick_position == nil then ctrl.stick_position = 'Any' end
         if ctrl.stick_handoff == nil then ctrl.stick_handoff = runtime.STICK_HANDOFF or 120 end
         if ctrl.stick_pct == nil then ctrl.stick_pct = runtime.STICK_PCT or 30 end
+        if ctrl.ranged_rubber_pct == nil then ctrl.ranged_rubber_pct = 20 end
         if ctrl.hunter_z_plane == nil then ctrl.hunter_z_plane = 15 end
         if ctrl.hunter_z == nil then ctrl.hunter_z = 75 end
         ctrl.maintain_buffs = true
@@ -3285,6 +3286,9 @@ end
 -- VF: Returns true if an action (spell, AA, disc, skill) is detrimental (offensive).
 local function isDetrimentalAction(name, targetToken, entry)
     if not name or name == '' then return false end
+    -- VF: Fade dumps hate on self — never wait for a swing.
+    if entry and runtime.castRole and runtime.castRole(entry) == 'Fade' then return false end
+    if entry and (entry.cast_type == 'Fade' or entry.t3_type == 'Fade') then return false end
     targetToken = tostring(targetToken or '')
 
     if targetToken:sub(1, 2) == 'E:' then return true end
@@ -4358,7 +4362,7 @@ local function fireItem(name, a, id)
     -- VF: Buff/heal clickies skip the swing gate — item name is not a Spell (spellClassInfo = det).
     local needSwing = role ~= 'Buff' and role ~= 'HoT' and role ~= 'Heal'
         and role ~= 'Cure' and role ~= 'Panic' and role ~= 'Summon'
-        and role ~= 'PetBuff' and role ~= 'PetHeal'
+        and role ~= 'PetBuff' and role ~= 'PetHeal' and role ~= 'Fade'
     if needSwing and (ctrl.combat_style or 'Melee') == 'Melee' then
         local swinging = false
         pcall(function() swinging = not not mq.TLO.Me.Combat() end)
@@ -4687,41 +4691,7 @@ local function moveToward(id, dist, followOnly)
     return false
 end
 
--- VF: bow in the face: never /attack on the bow line.
--- VF: Manual/Pause: no autofire / melee swap until you armed the fight.
-runtime.rangedFightTick = function(tid, mayClose)
-    tid = tonumber(tid) or 0
-    if tid <= 0 then return end
-    if runtime.manualFightConsent and not runtime.manualFightConsent() then return end
-    if mq.TLO.Me.Sitting() or mq.TLO.Me.Ducking() then mq.cmd('/stand') end
-    local d = distToId(tid)
-    local stand = (ctrl and tonumber(ctrl.ranged_dist)) or 40
-    local reach = maxMeleeDistance(tid)
-    if reach < 8 then reach = 8 end
-    if d <= reach then
-        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
-        if runtime.ensureAttack then runtime.ensureAttack(tid) end
-        -- VF: stickFollowTarget waits on Me.Combat -- first swap tick would not stick.
-        if runtime.stickPursue then runtime.stickPursue(tid) end
-        return
-    end
-    if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
-    -- VF: bow heading is ours. MQ2Melee facing is a melee rail and stays off.
-    local now = os.clock()
-    if (now - (runtime.rangedFaceAt or 0)) > 0.35 then
-        runtime.rangedFaceAt = now
-        mq.cmdf('/face fast id %d', tid)
-    end
-    -- VF: slack so Rush/Group moveToward and this tick do not re-nav at stand+1.
-    if d > stand + 4 then
-        if mayClose and not (runtime.castingMustStand and runtime.castingMustStand()) then
-            moveToward(tid, stand)
-        end
-        return
-    end
-    stopMoving()
-    if not mq.TLO.Me.AutoFire() then mq.cmd('/autofire on') end
-end
+-- VF: rangedFightTick lives in vft/ranged.lua (rubber band, /nav loc, melee fallback).
 
 -- VF: a summon yanks us off-route mid-travel. Without this TA keeps navving back
 -- VF: to the pin and issuing /attack off every tick while the mob beats on us.
@@ -5227,6 +5197,7 @@ end
 -- VF: Pulsed every main-loop delay (~150ms) — combatTick alone is 0.4s and misses stand→attack.
 runtime.pulseMeleeAttack = function()
     if mq.TLO.Me.Dead() then return false end
+    if runtime.groupFadeHold and runtime.groupFadeHold() then return false end
     if (ctrl.combat_style or 'Melee') ~= 'Melee' then return false end
     if runtime.meleeEnrageHold and runtime.meleeEnrageHold() then return false end
     -- VF: Rush/ignore transit owns feet — unless Manual is already in the pack.
@@ -6026,6 +5997,7 @@ fullStop = function()
     pursuit.lastNavTargetId = 0
     pursuit.lastNavLoc = nil
     pursuit.wanderLoc = nil
+    if runtime.rangedReset then runtime.rangedReset() end
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
     runtime.manualFightArmed = false
@@ -6085,6 +6057,7 @@ onZoned = function()
     pursuit.unreachableIds = {}
     pursuit.id = 0
     pursuit.wanderLoc = nil
+    if runtime.rangedReset then runtime.rangedReset() end
     runtime.pullState = 'IDLE'
     runtime.pullTargetId = 0
     runtime.discExpires = {}
@@ -6520,6 +6493,7 @@ runtime.isUnreachable = isUnreachable
 
 require('vft.modes.group').install(runtime, {
     ctrl                 = function() return ctrl end,
+    loadout              = function() return loadout end,
     distToId             = distToId,
     setTarget            = setTarget,
     moveToward           = moveToward,
@@ -6533,6 +6507,18 @@ require('vft.modes.group').install(runtime, {
     isGroupOrRaidMember  = isGroupOrRaidMember,
     isSpawnAlive         = isSpawnAlive,
     claimMover           = runtime.claimMover,
+})
+
+require('vft.ranged').install(runtime, {
+    ctrl                 = function() return ctrl end,
+    pursuit              = pursuit,
+    distToId             = distToId,
+    distToLoc            = distToLoc,
+    hasLoS               = hasLoS,
+    moveToward           = moveToward,
+    moveTowardLoc        = moveTowardLoc,
+    stopMoving           = stopMoving,
+    maxMeleeDistance     = maxMeleeDistance,
 })
 
 require('vft.modes.roam').install(runtime, {
@@ -6908,8 +6894,14 @@ local function combatTick()
     local tid = mq.TLO.Target.ID() or 0
     -- VF: Roam only -- see desiredRange.
     local isPullStandBack = (ctrl.mode == 'Roam' and ctrl.pull_stand_back and ctrl.pull_style ~= 'Facepull')
-    -- VF: maySwing is ensureAttack. Melee close is AssistOn, not moveToward.
-    if style == 'Melee' then
+    -- VF: Fade dump — do not re-swing / autofire for a beat so hate can land on the tank.
+    if runtime.groupFadeHold and runtime.groupFadeHold() then
+        if mq.TLO.Me.Combat() and runtime.attackReleaseOk and runtime.attackReleaseOk() then
+            mq.cmd('/attack off')
+        end
+        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+    elseif style == 'Melee' then
+        -- VF: maySwing is ensureAttack. Melee close is AssistOn, not moveToward.
         if not isPullStandBack then
             if haveNPC and autoAttackOk and runtime.inFight() then
                 if runtime.assistOn then
@@ -7191,8 +7183,8 @@ local function isSelfHealEntry(entry, spellName, explicitMode)
     if entry.ooc_heal then return true end
     if explicitMode then return false end
     local role = runtime.castRole and runtime.castRole(entry) or nil
-    -- VF: Panic is combat survival only ? never OOC top-off / selfHealCast.
-    if role == 'Panic' then return false end
+    -- VF: Panic / Fade are combat-only — never OOC top-off / selfHealCast.
+    if role == 'Panic' or role == 'Fade' then return false end
     if role == 'Buff' or role == 'PetBuff' or role == 'Summon' then
         return false
     end
@@ -7201,7 +7193,7 @@ local function isSelfHealEntry(entry, spellName, explicitMode)
         if U.baseTok(entry.target) == 'Myself' then return true end
     end
     local typ = entry.cast_type or entry.t3_type
-    if typ == 'Panic' then return false end
+    if typ == 'Panic' or typ == 'Fade' then return false end
     if typ == 'Buff' or typ == 'PetBuff' or typ == 'Summon' then
         return false
     end

@@ -1,13 +1,14 @@
 -- VF: inv-only overlay. Copies vfi.lua + vft/inv/** + inv satellite modules from the same GitHub zip.
 -- VF: Check fetches lua/vft/inv/version.txt. No README fallback (that is suite).
 -- VF: Overlay copy list must match vfi.lua ensureInvTree.
+-- VF: Branch is vft.updatechan (config/vf_overlay.lua), same as suite.
 
 local mq = require('mq')
+local Chan = require('vft.updatechan')
 
 local M = {}
 
-M.REPO = 'belvue/veilfall-triune'
-M.BRANCH = 'main'
+M.REPO = Chan.REPO
 M.release = ''
 M.note = ''
 M.err = ''
@@ -15,7 +16,10 @@ M.state = true
 
 local job = nil
 local currentCache, currentAt = '', -1
-local VER_URL = 'https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/inv/version.txt'
+
+function M.branch()
+    return Chan.branch()
+end
 
 -- VF: mq.luaDir can be relative 'lua'. Resolve against configDir, never PowerShell CWD.
 local function luaDir()
@@ -104,7 +108,8 @@ local PS = [=[
 param(
     [Parameter(Mandatory = $true)][string]$LuaDir,
     [Parameter(Mandatory = $true)][string]$OutFile,
-    [switch]$Force
+    [switch]$Force,
+    [string]$Branch = 'main'
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -115,7 +120,7 @@ Write-Status 'run'
 $LuaDir = [IO.Path]::GetFullPath($LuaDir)
 if (-not (Test-Path $LuaDir)) { Write-Status "err lua dir missing"; exit 1 }
 $repo = 'belvue/veilfall-triune'
-$branch = 'main'
+if ($Branch -ne 'beta') { $Branch = 'main' }
 $token = $env:VF_GITHUB_TOKEN
 $headers = @('-sL', '-H', 'User-Agent: VF-Update')
 if ($token) { $headers += @('-H', "Authorization: Bearer $token") }
@@ -143,8 +148,8 @@ function Cmp-Ver([string]$a, [string]$b) {
     return 0
 }
 try {
-    $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@main/lua/vft/inv/version.txt"
-    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/main/lua/vft/inv/version.txt" }
+    $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/inv/version.txt"
+    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/inv/version.txt" }
     if (-not $rel) { throw 'inv version missing' }
     $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
     $vfiDest = Join-Path $LuaDir 'vfi.lua'
@@ -153,7 +158,7 @@ try {
     if ($old -match '(\d+\.\d+\.\d+)') { $old = $Matches[1] } else { $old = '0.0.0' }
     if (-not $Force -and (Test-Path $vfiDest) -and ((Cmp-Ver $old $rel) -ge 0)) { Write-Status "ok up-to-date $old"; exit 0 }
     $zip = Join-Path $tmp 'vf.zip'
-    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$branch"
+    & curl.exe @headers --max-time 60 -o $zip "https://codeload.github.com/$repo/zip/refs/heads/$Branch"
     if ($LASTEXITCODE -ne 0) { throw "curl zip $LASTEXITCODE" }
     if (-not (Test-Path $zip) -or ((Get-Item $zip).Length -lt 1000)) { throw 'zip too small' }
     & tar.exe -xf $zip -C $tmp
@@ -202,13 +207,13 @@ try {
 local function spawnCurlCheck()
     local out = tempDir() .. '\\vfi-ver.txt'
     pcall(os.remove, out)
-    job = { mode = 'check', out = out, at = os.clock(), limit = 12 }
+    job = { mode = 'check', out = out, at = os.clock(), limit = 12, url = Chan.cdn('lua/vft/inv/version.txt') }
     M.note = 'checking…'
     M.err = ''
     os.execute(string.format(
         'start "" /min curl.exe -sL --max-time 10 -A VF-Update -o "%s" "%s"',
         out:gsub('"', ''),
-        VER_URL))
+        job.url))
 end
 
 local function startUpdateJob(force)
@@ -229,10 +234,11 @@ local function startUpdateJob(force)
     M.err = ''
     M.note = 'updating…'
     os.execute(string.format(
-        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s"%s',
+        'start "" /min powershell.exe -NoProfile -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File "%s" -LuaDir "%s" -OutFile "%s" -Branch "%s"%s',
         ps1:gsub('"', ''),
         dest:gsub('"', ''),
         out:gsub('"', ''),
+        Chan.branch(),
         force and ' -Force' or ''))
     return true
 end
@@ -245,12 +251,25 @@ end
 
 local function finishCheck()
     local body = job and readFile(job.out) or ''
+    local url = job and job.url or ''
     job = nil
     local ver = M.parseVer(body)
     if ver ~= '' then
         M.release = ver
         M.err = ''
         M.note = (M.cmpVer(M.current(), ver) >= 0) and 'up to date' or ''
+        return
+    end
+    local cdn = Chan.cdn('lua/vft/inv/version.txt')
+    local raw = Chan.raw('lua/vft/inv/version.txt')
+    if url == cdn then
+        job = { mode = 'check', out = tempDir() .. '\\vfi-ver.txt', at = os.clock(), limit = 12, url = raw }
+        pcall(os.remove, job.out)
+        M.note = 'checking…'
+        os.execute(string.format(
+            'start "" /min curl.exe -sL --max-time 10 -A VF-Update -o "%s" "%s"',
+            job.out:gsub('"', ''),
+            raw))
         return
     end
     M.note = ''
@@ -324,16 +343,16 @@ end
 
 function M.startUpdate()
     if job then return end
-    startUpdateJob()
+    startUpdateJob(Chan.isBeta())
 end
 
 function M.runCli(opts)
     opts = opts or {}
-    if not startUpdateJob(opts.force) then
+    if not startUpdateJob(opts.force or Chan.isBeta()) then
         print('\ag[VF:Inv]\ax \ar' .. (M.err ~= '' and M.err or 'update failed'))
         return false
     end
-    print('\ag[VF:Inv]\ax overlaying ' .. M.REPO .. '@' .. M.BRANCH)
+    print('\ag[VF:Inv]\ax overlaying ' .. Chan.REPO .. '@' .. Chan.branch())
     while job do
         mq.delay(200)
         M.tick()
@@ -358,6 +377,19 @@ function M.drawPanel()
     ImGui.Text('GitHub (inventory)')
     ImGui.Text('Release: ' .. (rel ~= '' and rel or (M.note == 'checking…' and 'checking…' or '—')))
     ImGui.Text('Current: ' .. (cur ~= '' and cur or '—'))
+    do
+        local beta = Chan.isBeta()
+        local newBeta = ImGui.Checkbox('Beta overlay##vfInvGitBeta', beta)
+        if newBeta ~= beta then
+            Chan.setBranch(newBeta and 'beta' or 'main')
+            M.release = ''
+            M.note = ''
+            M.err = ''
+        end
+        if ImGui.IsItemHovered() then
+            ImGui.SetTooltip('On: Check uses GitHub branch beta; Update always overlays that zip.\nOff: main (stable), skip when local version >= GitHub.\nSnapshot lua/ and push beta, then Update — no version bump needed.')
+        end
+    end
     if busy then
         if M.note ~= '' then ImGui.Text(M.note) end
     else
@@ -372,7 +404,8 @@ function M.drawPanel()
             M.startUpdate()
         end
         if ImGui.IsItemHovered() then
-            ImGui.SetTooltip('Overlay vfi.lua, vft/inv, and inv satellite modules from GitHub main.\nDoes not write vf.lua.')
+            ImGui.SetTooltip('Overlay vfi.lua, vft/inv, and inv satellite modules from GitHub '
+                .. Chan.branch() .. '.\nBeta always copies even if the version number matches. Main still skips.\nDoes not write vf.lua.')
         end
     end
     if M.err ~= '' then

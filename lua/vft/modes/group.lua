@@ -1,6 +1,7 @@
 -- VF: Group mode — follow the anchor; fight when MA/MT declare a mob.
 -- VF: Anchor (follow) = ctrl.ma_name override, else Group.MainAssist / MainTank / Puller / Leader.
 -- VF: Mob = Me.GroupAssistTarget (MA), else MainTank.Target, else follow-anchor.Target.
+-- VF: Fade = Loadout Type Fade; dump hate when a mob is on us and we are not the Main Tank.
 
 local mq = require('mq')
 
@@ -30,6 +31,7 @@ function M.install(runtime, api)
     local isGrpMember   = api.isGroupOrRaidMember or function() return false end
     local spawnAlive    = api.isSpawnAlive or function() return false end
     local claimMover    = api.claimMover or function() end
+    local getLoadout    = api.loadout or function() return {} end
 
     local st = {
         active = false, followId = 0, sig = '', warned = false, lastMode = nil, rolesSig = nil,
@@ -676,6 +678,7 @@ function M.install(runtime, api)
         st.followStuck = false
         st.navWarned = false
         st.xtarHinted = false
+        st.fadeHoldUntil = 0
         log('exit Group')
     end
 
@@ -704,8 +707,132 @@ function M.install(runtime, api)
         st.lastMode = mode
     end
 
+    local function fadeRole(entry)
+        if runtime.castRole then return runtime.castRole(entry) end
+        return entry and (entry.cast_type or entry.t3_type) or nil
+    end
+
+    local function fadeDelegated(name)
+        local skip = false
+        pcall(function()
+            skip = not not require('vft.mgr.melee_catalog').isDelegated(name)
+        end)
+        return skip
+    end
+
+    local function fadeCandidates()
+        local loadout = getLoadout()
+        local out = {}
+        if type(loadout) ~= 'table' then return out end
+        local function add(kind, name, entry, slot)
+            if type(entry) ~= 'table' then return end
+            name = tostring(name or '')
+            if name == '' then return end
+            if entry.enabled == false then return end
+            -- VF: gem mute is pct=0.
+            if entry.pct == 0 then return end
+            if fadeRole(entry) ~= 'Fade' then return end
+            if fadeDelegated(name) then return end
+            out[#out + 1] = { kind = kind, name = name, entry = entry, slot = slot }
+        end
+        for name, a in pairs(loadout.aas or {}) do
+            if a and a.enabled then add('aa', name, a) end
+        end
+        for name, d in pairs(loadout.discs or {}) do
+            add('disc', name, d)
+        end
+        for name, it in pairs(loadout.items or {}) do
+            if it and it.enabled then add('item', name, it) end
+        end
+        for i = 1, 12 do
+            local g = loadout.gems and loadout.gems[i]
+            if type(g) == 'table' then add('gem', g.spell, g, i) end
+        end
+        return out
+    end
+
+    local function fireDoability(name)
+        local ready = false
+        pcall(function() ready = not not mq.TLO.Me.AbilityReady(name)() end)
+        if not ready then return false end
+        mq.cmdf('/doability "%s"', name)
+        return true
+    end
+
+    local function fireFadeEntry(c)
+        if not c or not c.name then return false end
+        local me = 0
+        pcall(function() me = mq.TLO.Me.ID() or 0 end)
+        if runtime.attackReleaseOk and runtime.attackReleaseOk() then
+            if mq.TLO.Me.Combat() then mq.cmd('/attack off') end
+        end
+        if mq.TLO.Me.AutoFire() then mq.cmd('/autofire off') end
+        local row = c.entry or { target = 'Myself' }
+        if c.kind == 'aa' then
+            return runtime.fireAA and runtime.fireAA(c.name, row, me) and true or false
+        end
+        if c.kind == 'item' then
+            return runtime.fireItem and runtime.fireItem(c.name, row, me) and true or false
+        end
+        if c.kind == 'gem' then
+            return runtime.castGem and runtime.castGem(c.slot, row, me) and true or false
+        end
+        if c.kind == 'disc' then
+            if row.via == 'skill' then
+                return fireDoability(c.name)
+            end
+            if runtime.fireDisc then
+                local ok = runtime.fireDisc(c.name, row, me)
+                if ok == true then return true end
+            end
+            return fireDoability(c.name)
+        end
+        return false
+    end
+
+    -- VF: Group only, not MT. Dump when a mob has hate on us (ToT/holder/100%).
+    function runtime.groupFadeHold()
+        return os.clock() < (st.fadeHoldUntil or 0)
+    end
+
+    local function groupFadeTick()
+        local ctrl = getCtrl()
+        if not ctrl or ctrl.mode ~= 'Group' or not ctrl.running then return end
+        local members = 0
+        pcall(function() members = mq.TLO.Group.Members() or 0 end)
+        if members < 1 then return end
+        local me = 0
+        pcall(function() me = mq.TLO.Me.ID() or 0 end)
+        if me > 0 and roleHolderId('MainTank') == me then return end
+        local now = os.clock()
+        if now < (st.fadeHoldUntil or 0) then return end
+        if (now - (st.fadeAt or 0)) < 0.5 then return end
+        local onMe = false
+        local tid = 0
+        pcall(function() tid = mq.TLO.Target.ID() or 0 end)
+        if tid > 0 and runtime.spawnIsOnMe and runtime.spawnIsOnMe(tid) then
+            onMe = true
+        elseif runtime.closestMobOnMe and runtime.closestMobOnMe(80) then
+            onMe = true
+        end
+        if not onMe then return end
+        local list = fadeCandidates()
+        if #list == 0 then return end
+        for i = 1, #list do
+            if fireFadeEntry(list[i]) then
+                st.fadeAt = now
+                st.fadeHoldUntil = now + 1.5
+                print(string.format('\ag[VF]\ax Group Fade -- %s (aggro on us).', list[i].name))
+                log('fade ' .. list[i].name)
+                return
+            end
+        end
+        st.fadeAt = now
+    end
+
     function runtime.groupModeTick()
         runtime.groupModeSync()
+        groupFadeTick()
         local ctrl = getCtrl()
         if not ctrl or ctrl.mode ~= 'Group' then return false, false end
 

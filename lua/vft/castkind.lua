@@ -18,7 +18,7 @@ local TYPE_ALIASES = {
 
 local ROLES = {
     Melee = true, Nuke = true, DoT = true, Debuff = true, CC = true,
-    Heal = true, HoT = true, Cure = true, Panic = true, Tap = true,
+    Heal = true, HoT = true, Cure = true, Panic = true, Fade = true, Tap = true,
     Buff = true, Summon = true, PetHeal = true, PetBuff = true,
 }
 
@@ -26,9 +26,10 @@ local ROLES = {
 local SURVIVAL = { Panic = true, Heal = true, Tap = true, HoT = true, Cure = true }
 
 -- VF: lower = more urgent. nil = combat rotation (never preempts). Leave gaps to grow.
--- VF: Panic 0 · Heal 4 · HoT/Tap 5 · Cure 6 · OOC cold 9.
+-- VF: Panic 0 · Fade 1 · Heal 4 · HoT/Tap 5 · Cure 6 · OOC cold 9.
 local CAST_PRIORITY = {
     Panic = 0,
+    Fade = 1,
     Heal = 4,
     HoT = 5,
     Tap = 5,
@@ -111,6 +112,7 @@ function M.idleBuffOk(entry, role, ctrl, inFight)
 end
 
 -- VF: Gate 4 — after Panic/Heal. Melee dumps every tick; other buckets share one cast bar.
+-- VF: Fade is Group-only (modes/group.lua), not a rotate bucket.
 M.OFFENSE_BUCKETS = {
     { 'PetHeal' },
     { 'Melee' },

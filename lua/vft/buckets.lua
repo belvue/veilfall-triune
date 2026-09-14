@@ -537,7 +537,8 @@ function M.install(runtime, api)
                         local id = api.resolveTargetId and api.resolveTargetId(it.target, it.cls) or 0
                         -- VF: Buff/HoT always resolve to Me before fireItem.
                         if role == 'Buff' or role == 'HoT' or role == 'Heal'
-                            or role == 'Panic' or role == 'Cure' or role == 'Summon' then
+                            or role == 'Panic' or role == 'Cure' or role == 'Summon'
+                            or role == 'Fade' then
                             pcall(function()
                                 local mid = mq.TLO.Me.ID() or 0
                                 if mid > 0 then id = mid end
@@ -765,7 +766,7 @@ function M.install(runtime, api)
         local meId = 0
         pcall(function() meId = tonumber(mq.TLO.Me.ID()) or 0 end)
         local function coldOrSurvival(role)
-            return role == 'Panic' or role == 'Heal' or role == 'Cure' or role == 'HoT'
+            return role == 'Panic' or role == 'Fade' or role == 'Heal' or role == 'Cure' or role == 'HoT'
                 or role == 'Buff' or role == 'PetBuff' or role == 'Summon'
         end
         local function buffAlreadyUp(name, id)

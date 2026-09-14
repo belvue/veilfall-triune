@@ -6,10 +6,10 @@ local U = require('vft.mgr.util')
 local NUM_GEMS = 12
 
 -- VF: Role tags for rotate buckets. docs/COMBAT_TICK_IDEAL.md
--- VF: Burn is burn_only checkbox, not a Type. CC = mez/add control, not kill target.
+-- VF: Fade is Group aggro dump only — not a bucket, not a heal. Burn is burn_only, not a Type.
 local TYPES = {
     'Melee', 'Nuke', 'DoT', 'Debuff', 'CC',
-    'Heal', 'Tap', 'HoT', 'Cure', 'Panic',
+    'Heal', 'Tap', 'HoT', 'Cure', 'Panic', 'Fade',
     'Buff', 'Summon', 'PetHeal', 'PetBuff',
 }
 local TYPE_SET = {}
@@ -61,7 +61,7 @@ local function defaultCombat(typ)
     if typ == 'Buff' or typ == 'PetBuff' or typ == 'Summon' then
         return 'Out of Combat'
     end
-    -- VF: Heal / HoT / Cure / Panic: Always (HoT = HP% + missing on buff/short).
+    -- VF: Heal / HoT / Cure / Panic / Fade: Always (HoT = HP% + missing on buff/short).
     return 'Always'
 end
 
@@ -136,6 +136,7 @@ local function mapType(typ)
     if typ == 'Cure' then return 'has Poison/Disease', 'F: Myself' end
     if typ == 'Summon' then return 'missing pet', 'F: Myself' end
     if typ == 'CC' then return 'target HP <=', 'E: Unmezzed Add' end
+    if typ == 'Fade' then return 'always', 'F: Myself' end
     if typ == 'Melee' then return 'target HP <=', 'E: Current Target' end
     if typ == 'DoT' or typ == 'Nuke' or typ == 'Debuff' then
         return 'target HP <=', 'E: Current Target'
@@ -1092,6 +1093,7 @@ local function writeAssistToControl(control, assist)
 end
 
 -- VF: Group tab â€” approved PC whitelist for auto-accept + stay in Group mode.
+-- VF: Group Fade is a Loadout Type, not a Group-tab name list.
 local function defaultGroupTrust()
     return {
         auto_accept = true,
@@ -1131,6 +1133,7 @@ local function writeGroupTrustToControl(control, trust)
     trust = copyGroupTrust(trust)
     control.group_auto_accept = trust.auto_accept and true or false
     control.group_stay = trust.stay and true or false
+    control.group_fade = nil
     control.group_approved = {}
     for i, n in ipairs(trust.names) do
         control.group_approved[i] = n
@@ -1154,6 +1157,7 @@ local function defaultPrefs()
         style = 'Melee',
         melee = 14,
         ranged = 40,
+        ranged_rubber = 20,
         stick_position = 'Any',
         stick_handoff = 120,
         stick_pct = 30,
@@ -1199,7 +1203,8 @@ local function copyPrefs(src)
     local style = src.combat_style or src.style
     if FIGHT_STYLE_SET[style] then p.style = style end
     p.melee = clamp(src.melee_dist or src.melee, 5, 50, p.melee)
-    p.ranged = clamp(src.ranged_dist or src.ranged, 15, 200, p.ranged)
+    p.ranged = clamp(src.ranged_dist or src.ranged, 0, 300, p.ranged)
+    p.ranged_rubber = clamp(src.ranged_rubber_pct or src.ranged_rubber, 0, 50, p.ranged_rubber)
     local spos = src.stick_position
     if STICK_POSITION_SET[spos] then p.stick_position = spos end
     p.stick_handoff = clamp(src.stick_handoff, 40, 200, p.stick_handoff)
@@ -1446,6 +1451,7 @@ local function writePrefsToControl(control, prefs)
     control.combat_style = prefs.style
     control.melee_dist = prefs.melee
     control.ranged_dist = prefs.ranged
+    control.ranged_rubber_pct = prefs.ranged_rubber
     control.stick_position = prefs.stick_position
     control.stick_handoff = prefs.stick_handoff
     control.stick_pct = prefs.stick_pct
