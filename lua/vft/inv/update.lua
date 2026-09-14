@@ -148,8 +148,14 @@ function Cmp-Ver([string]$a, [string]$b) {
     return 0
 }
 try {
-    $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/inv/version.txt"
-    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/inv/version.txt" }
+    $rel = ''
+    if ($Branch -eq 'beta') {
+        $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/inv/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/inv/version.txt" }
+    } else {
+        $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/inv/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/inv/version.txt" }
+    }
     if (-not $rel) { throw 'inv version missing' }
     $verFile = Join-Path $LuaDir 'vft\inv\version.txt'
     $vfiDest = Join-Path $LuaDir 'vfi.lua'
@@ -207,7 +213,8 @@ try {
 local function spawnCurlCheck()
     local out = tempDir() .. '\\vfi-ver.txt'
     pcall(os.remove, out)
-    job = { mode = 'check', out = out, at = os.clock(), limit = 12, url = Chan.cdn('lua/vft/inv/version.txt') }
+    job = { mode = 'check', out = out, at = os.clock(), limit = 12,
+        url = Chan.isBeta() and Chan.raw('lua/vft/inv/version.txt') or Chan.cdn('lua/vft/inv/version.txt') }
     M.note = 'checking…'
     M.err = ''
     os.execute(string.format(

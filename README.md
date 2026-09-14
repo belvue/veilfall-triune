@@ -1,6 +1,6 @@
 # Veilfall: Triune
 
-0.6.16 — work in progress. Not a finished assistant.
+0.6.17 — work in progress. Not a finished assistant.
 
 Suite AutoRun:
 

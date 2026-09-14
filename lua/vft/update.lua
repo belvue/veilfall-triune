@@ -145,8 +145,14 @@ function Cmp-Ver([string]$a, [string]$b) {
     return 0
 }
 try {
-    $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/version.txt"
-    if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/version.txt" }
+    $rel = ''
+    if ($Branch -eq 'beta') {
+        $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/version.txt" }
+    } else {
+        $rel = Get-Ver "https://cdn.jsdelivr.net/gh/belvue/veilfall-triune@$Branch/lua/vft/version.txt"
+        if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/lua/vft/version.txt" }
+    }
     if (-not $rel) { $rel = Get-Ver "https://raw.githubusercontent.com/belvue/veilfall-triune/$Branch/README.md" }
     $verFile = Join-Path $LuaDir 'vft\version.txt'
     $vfiDest = Join-Path $LuaDir 'vfi.lua'
@@ -339,7 +345,9 @@ end
 
 function M.startCheck()
     if job then return end
-    spawnCurlCheck(Chan.cdn('lua/vft/version.txt'))
+    -- VF: beta Check uses GitHub raw — jsDelivr @branch can stay stale for hours.
+    local url = Chan.isBeta() and Chan.raw('lua/vft/version.txt') or Chan.cdn('lua/vft/version.txt')
+    spawnCurlCheck(url)
 end
 
 function M.startUpdate()
